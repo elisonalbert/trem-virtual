@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SPECTRA | Plataforma modular</title>
+    <style>
+      :root { color-scheme: dark; font-family: Consolas, monospace; background: #090b0e; color: #dfe3ea; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(circle at 50% 20%, #18313a, #090b0e 60%); }
+      main { width: min(720px, calc(100% - 32px)); padding: 32px; border: 1px solid #2a4850; background: rgba(10, 14, 18, .88); }
+      h1 { color: #c9d900; font-size: 18px; letter-spacing: 2px; }
+      p { color: #93a2ad; line-height: 1.6; font-size: 13px; }
+      a { display: inline-block; margin-top: 12px; color: #00eaff; border: 1px solid #00eaff; padding: 10px 14px; text-decoration: none; }
+      button { margin: 12px 8px 0 0; color: #c9d900; border: 1px solid #c9d900; background: transparent; padding: 10px 14px; cursor: pointer; font: inherit; }
+      #gpu-preview { width: 100%; height: 180px; display: block; margin-top: 22px; border: 1px solid #26333a; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>SPECTRA / PLATAFORMA MODULAR</h1>
+      <p>Infraestrutura Vite + TypeScript ativa. A simulação completa continua disponível no demonstrador legado enquanto os assets GLB são incorporados.</p>
+      <a href="/spectra-demo-v3_9.html">Abrir demonstrador técnico</a>
+      <button id="sound-enable">Ativar áudio imersivo</button>
+      <button id="scan-test">Testar pulso UV-A</button>
+      <canvas id="gpu-preview" aria-label="Prévia GPU de partículas"></canvas>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
