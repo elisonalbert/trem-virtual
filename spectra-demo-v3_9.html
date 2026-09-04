@@ -6,6 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SPECTRA | Solluria — Demonstrador Técnico v3</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- Leaflet: minimapa GPS real, 100% frontend (tiles públicos OpenStreetMap, sem backend) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <style>
     :root {
       --bg: #0a0b0d;
@@ -1639,10 +1642,31 @@
       border: 2px solid rgba(255, 255, 255, 0.16);
     }
 
-    #ghMinimap canvas {
+    /* Era <canvas>, agora é uma <div> hospedando o mapa Leaflet — o container
+       precisa ocupar 100% do círculo de #ghMinimap igual antes, e o fundo cobre
+       o instante entre o layout aplicar e os tiles chegarem. */
+    #ghMinimap #ghMiniCanvas {
       display: block;
       width: 100%;
       height: 100%;
+      background: #1a1d1a;
+    }
+
+    #ghMinimap .leaflet-container {
+      background: #1a1d1a;
+      font-family: inherit;
+    }
+
+    /* Marcador do trem no mapa real — mesmo estilo (branco por fora, azul por
+       dentro) do ponto que o minimapa em canvas desenhava. */
+    .gps-train-marker span {
+      display: block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #4aa3ff;
+      border: 2px solid #fff;
+      box-shadow: 0 0 6px rgba(74, 163, 255, 0.9);
     }
 
     #ghDriver {
@@ -1946,7 +1970,7 @@
         <span class="gh-unit">t · Minério</span>
       </div>
 
-      <div id="ghMinimap" class="gh-panel"><canvas id="ghMiniCanvas" width="392" height="392"></canvas></div>
+      <div id="ghMinimap" class="gh-panel" title="Mapa: dados © colaboradores OpenStreetMap"><div id="ghMiniCanvas"></div></div>
 
       <div id="ghDriver" class="gh-panel">
         <div id="ghThrottleHint"><b>[E]</b> <span id="ghDriveState">Modo Maquinista (Ativar)</span></div>
@@ -4019,7 +4043,7 @@
 
       var dirtRoadTex = makeDirtRoadTexture();
       var dirtRoadBumpTex = makeGroundBumpTexture();
-      dirtRoadBumpTex.repeat.set(TRACK_HALF * 3.5, 2); // eixos trocados junto com a reorientação da estrada
+      dirtRoadBumpTex.repeat.copy(dirtRoadTex.repeat); // tem que casar com o repeat do diffuse (40,2) — ficou em (TRACK_HALF*3.5, 2) por engano, 26x mais denso
       var dirtRoadMat = new THREE.MeshStandardMaterial({ map: dirtRoadTex, bumpMap: dirtRoadBumpTex, bumpScale: 0.09, roughness: 1 });
       // Mesma correção de orientação das faixas de grama: era 3.4 em X por 190 em
       // Z, ou seja atravessada. Agora corre ao longo da via e acompanha a curva —
@@ -6084,7 +6108,7 @@
         walkMode = on;
         document.getElementById('walkModeBtn').classList.toggle('active', on);
         if (on) {
-          cancelTween(); breakFollow();
+          cancelTween(); breakFollow(); cabinView = false;
           var dir = new THREE.Vector3().subVectors(controlsTarget, camera.position).normalize();
           walkYaw = Math.atan2(-dir.x, -dir.z);
           walkPitch = THREE.MathUtils.clamp(Math.asin(dir.y), -1.4, 1.4);
@@ -6175,6 +6199,7 @@
         dom.style.cursor = panning ? 'move' : 'grabbing';
         cancelTween();
         breakFollow();
+        interruptDroneTour();
       });
       window.addEventListener('mouseup', function () { dragging = false; dom.style.cursor = 'grab'; });
       window.addEventListener('mousemove', function (e) {
@@ -6207,13 +6232,14 @@
         e.preventDefault();
         cancelTween();
         breakFollow();
+        interruptDroneTour();
         spherical.radius *= (1 + e.deltaY * 0.0011);
         spherical.radius = THREE.MathUtils.clamp(spherical.radius, minRadius, maxRadius);
       }, { passive: false });
 
       var touchLast = null, pinchLast = null;
       dom.addEventListener('touchstart', function (e) {
-        cancelTween(); breakFollow();
+        cancelTween(); breakFollow(); interruptDroneTour();
         if (e.touches.length === 1) { touchLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
         else if (e.touches.length === 2) {
           var dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -6265,6 +6291,7 @@
         if (droneTourTimer) clearTimeout(droneTourTimer);
         switchTab('3d');
         hideIntro();
+        setGuidedMode(false); // evita que o ciclo do Demo Guiado troque `state` por baixo do tour
         droneTourActive = true;
         simulationPaused = false;
         followLoco = false; cabinView = false;
@@ -6284,6 +6311,7 @@
                 tourAxle.segScore = 0.9; tourAxle.temporalScore = 0.95; tourAxle.cnnScore = 0.92;
                 tourAxle.confidence = 0.93; tourAxle.contaminated = false; tourAxle.cascadePhase = 'confirmed';
                 tourAxle.bboxMat.color.setHex(tourAxle.finalColorHex); tourAxle.cornerMat.color.setHex(tourAxle.finalColorHex);
+                emitAlertPayload(tourAxle);
                 handleConfirmedLeak(tourAxle);
               }
               simulationPaused = true;
@@ -6296,6 +6324,18 @@
             }, 1700);
           }, 2600);
         }, 2100);
+      }
+      function interruptDroneTour() {
+        // Interação manual (arrastar/zoom/toque) assume o controle: cancela os
+        // setTimeout pendentes do Tour Drone sem forçar a câmera de volta pro
+        // overview — sem isso, um dos callbacks agendados (followLoco, flyTo,
+        // pausa) dispara segundos depois e atropela a câmera que o usuário
+        // acabou de pegar manualmente.
+        if (!droneTourActive) return;
+        if (droneTourTimer) { clearTimeout(droneTourTimer); droneTourTimer = null; }
+        droneTourActive = false;
+        simulationPaused = false;
+        document.getElementById('droneTourBtn').textContent = '▶ Tour Drone';
       }
       function stopDroneTour() {
         if (droneTourTimer) { clearTimeout(droneTourTimer); droneTourTimer = null; }
@@ -6371,15 +6411,14 @@
           targetVals.greaseEmissiveI = 0; targetVals.glowOpacity = 0;
           telMode.textContent = 'Luz Visível'; telLight.textContent = 'Diurna';
           shutterEl.textContent = '—';
-        } else if (s === 'uv') {
+        } else if (s === 'uv' || s === 'weber') {
+          // 'uv' e 'weber' compartilham a mesma iluminação/obturador — só o
+          // texto do modo telemetrado muda (o pipeline de detecção roda por
+          // cima da mesma captura UV-A, não é uma cena separada).
           targetVals.ambientI = 0.025; targetVals.hemiI = 0.02; targetVals.sunI = 0.03;
           targetVals.uvSpotI = 5.5; targetVals.uvLensEmissive = 1.6;
-          telMode.textContent = 'Disparo UV-A 365nm'; telLight.textContent = 'UV-A (violeta)';
-          shutterEl.textContent = '< 1/2000s (estroboscópico)';
-        } else if (s === 'weber') {
-          targetVals.ambientI = 0.025; targetVals.hemiI = 0.02; targetVals.sunI = 0.03;
-          targetVals.uvSpotI = 5.5; targetVals.uvLensEmissive = 1.6;
-          telMode.textContent = 'Edge Computing (Weber)'; telLight.textContent = 'UV-A (violeta)';
+          telMode.textContent = s === 'uv' ? 'Disparo UV-A 365nm' : 'Edge Computing (Weber)';
+          telLight.textContent = 'UV-A (violeta)';
           shutterEl.textContent = '< 1/2000s (estroboscópico)';
         }
         setWeather(weather);
@@ -6434,8 +6473,10 @@
       function guidedTick() {
         if (!guidedMode) return;
         var step = GUIDED_SEQUENCE[guidedIndex];
-        setState(step.state);
-        guidedIndex = (guidedIndex + 1) % GUIDED_SEQUENCE.length;
+        if (!droneTourActive) { // não pisa no `state` script do Tour Drone enquanto ele roda
+          setState(step.state);
+          guidedIndex = (guidedIndex + 1) % GUIDED_SEQUENCE.length;
+        }
         guidedTimer = setTimeout(guidedTick, step.dur);
       }
       function setGuidedMode(on) {
@@ -6611,6 +6652,13 @@
         gameMode = on;
         document.body.classList.toggle('game-mode', on);
         setSoundEnabled(on);
+        if (on) {
+          initGpsMap();
+          // #gameHud estava com display:none; o Leaflet só mede o container
+          // (e busca os tiles certos) depois que o navegador aplica esse
+          // display:block — daí o invalidateSize adiado pro próximo tick.
+          setTimeout(function () { if (gpsMap) gpsMap.invalidateSize(); }, 0);
+        }
       }
       document.getElementById('gameModeBtn').addEventListener('click', function () { setGameMode(!gameMode); });
       window.addEventListener('keydown', function (e) {
@@ -6646,7 +6694,7 @@
       window.addEventListener('keydown', function (e) {
         var k = e.key.toLowerCase();
         if (k === 'e') { setDriverMode(!driverMode); return; }
-        if (!driverMode) return;
+        if (!driverMode || walkMode) return; // no modo Andar, W/S move a câmera, não o acelerador
         if (k === 'w') { throttleNotch = Math.min(THROTTLE_NOTCHES, throttleNotch + 1); updateDriveHint(); }
         if (k === 's') { throttleNotch = Math.max(0, throttleNotch - 1); updateDriveHint(); }
       });
@@ -6711,65 +6759,10 @@
         ctx.fillText(Math.round(rpm) + ' RPM', C, C + 104);
       }
 
-      /* --- Minimapa: a via corre no eixo X e serpenteia em Z, então o mapa é
-         uma vista de cima com o traçado real amostrado da mesma função da cena.
-         Desenha marco do pórtico (KM 341) e o rio como referência de posição. --- */
-      var miniCv = document.getElementById('ghMiniCanvas');
-      var miniCtx = miniCv.getContext('2d');
-      function drawMinimap(trainWorldX) {
-        var W = miniCv.width, ctx = miniCtx;
-        ctx.clearRect(0, 0, W, W);
-        ctx.fillStyle = 'rgba(24,30,24,0.9)';
-        ctx.fillRect(0, 0, W, W);
-
-        // pasto de fundo
-        ctx.fillStyle = 'rgba(58,88,42,0.55)';
-        ctx.fillRect(0, 0, W, W);
-
-        var cx = W / 2;
-        // A via ocupa LOOP unidades no mundo; mapeia pra altura do minimapa.
-        function xToPy(x) { return W / 2 - (x / (LOOP / 2)) * (W * 0.42); }
-        function zToPx(z) { return cx + (z / (LOOP / 2)) * (W * 0.42); }
-
-        // Leito da via — desenhado amostrando a MESMA função de traçado da cena 3D,
-        // então o desenho do mapa não pode divergir de onde o trilho realmente está.
-        function strokeTrack(color, width) {
-          ctx.strokeStyle = color; ctx.lineWidth = width;
-          ctx.beginPath();
-          for (var sx = -LOOP / 2; sx <= LOOP / 2; sx += 2) {
-            var px = zToPx(trackZ(sx)), py = xToPy(sx);
-            if (sx === -LOOP / 2) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-          }
-          ctx.stroke();
-        }
-        strokeTrack('rgba(196,120,72,0.95)', 16);
-        strokeTrack('rgba(40,40,44,0.9)', 4);
-
-        // rio, cruzando a via
-        var riverPy = xToPy(RIVER_X);
-        ctx.strokeStyle = 'rgba(70,150,160,0.9)';
-        ctx.lineWidth = 12;
-        ctx.beginPath(); ctx.moveTo(0, riverPy); ctx.lineTo(W, riverPy); ctx.stroke();
-
-        // pórtico no marco zero (trecho reto do traçado, por construção)
-        var gantryPy = xToPy(0), gantryPx = zToPx(trackZ(0));
-        ctx.fillStyle = '#c9d900';
-        ctx.fillRect(gantryPx - 30, gantryPy - 4, 60, 8);
-        ctx.font = '600 20px sans-serif'; ctx.fillStyle = '#e8ff5c';
-        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText('KM 341', gantryPx + 38, gantryPy);
-
-        // trem — sobre a curva, não numa faixa central fixa
-        var tPy = xToPy(trainWorldX), tPx = zToPx(trackZ(trainWorldX));
-        ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.arc(tPx, tPy, 11, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#4aa3ff';
-        ctx.beginPath(); ctx.arc(tPx, tPy, 7, 0, Math.PI * 2); ctx.fill();
-
-        // borda
-        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 6;
-        ctx.beginPath(); ctx.arc(W / 2, W / 2, W / 2 - 3, 0, Math.PI * 2); ctx.stroke();
-      }
+      /* --- Minimapa: migrado de canvas 2D sintético pra mapa real (Leaflet,
+         ver initGpsMap/updateGpsMarker acima) — a geografia real ao redor da
+         âncora GPS_BASE já mostra rio/relevo, não precisa mais desenhar à
+         mão. O marco do pórtico (KM 341) virou um circleMarker fixo. --- */
 
       var ghTimeEl = document.getElementById('ghTime');
       var ghDateEl = document.getElementById('ghDate');
@@ -6786,7 +6779,7 @@
         if (!gameMode) return;
         var kmh = TRAIN_NOMINAL_KMH * driveFactor;
         drawSpeedo(kmh, 620 + driveFactor * 640);
-        drawMinimap(trainGroup.position.x);
+        updateGpsMarker(trainGroup.position.x);
 
         var hh = Math.floor(mod(simClock, 86400) / 3600), mm = Math.floor((mod(simClock, 86400) % 3600) / 60);
         ghTimeEl.textContent = pad2(hh) + ':' + pad2(mm);
@@ -6935,12 +6928,14 @@
           if (isDescendantOf(hits[i].object, ax.group)) continue;
           if (hits[i].distance < dist - 0.2) { blocked = true; break; }
         }
-        // A fonte selecionada no monitor Wayside é a mesma fonte do relatório.
-        // O operador precisa conseguir auditar exatamente a filmagem inferior ou
-        // superior; o overview só entra quando nenhuma fonte Wayside foi definida.
-        if (waysideSource === 'lower') return { cam: lower, label: (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)'), switched: false };
-        if (waysideSource === 'upper') return { cam: upper, label: (ax.side === 'ESQ' ? 'CAM-INSP-ESQ (pórtico)' : 'CAM-INSP-DIR (pórtico)'), switched: false };
-        if (!blocked) return { cam: primary, label: (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)'), switched: false };
+        // A fonte selecionada no monitor Wayside é só a PREFERÊNCIA do operador —
+        // se a checagem de oclusão acima achar essa câmera bloqueada, o fallback
+        // abaixo tenta a fonte alternativa e depois o overview. (Antes havia um
+        // retorno incondicional aqui pra 'lower'/'upper' que tornava esse fallback
+        // morto: a preferência sempre vencia, mesmo com a via bloqueada.)
+        if (!blocked) return { cam: primary, label: waysideSource === 'lower'
+          ? (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)')
+          : (ax.side === 'ESQ' ? 'CAM-INSP-ESQ (pórtico)' : 'CAM-INSP-DIR (pórtico)'), switched: false };
         // A fonte alternativa tenta a mesma captura antes da visão geral.
         primary = waysideSource === 'lower' ? upper : lower;
         primary.lookAt(bearingPos);
@@ -7099,6 +7094,81 @@
       function simulatedGps(worldX) {
         return { lat: +(GPS_BASE_LAT + worldX * 0.00006).toFixed(5), lon: +(GPS_BASE_LON - worldX * 0.00004).toFixed(5) };
       }
+
+      /* --- Minimapa GPS real (Leaflet) ------------------------------------
+         Mesma âncora GPS_BASE_LAT/LON acima (KM 341). Conversão por
+         aproximação plana (equirretangular): válida aqui porque o traçado
+         inteiro (LOOP=420 unidades, ±2.1km com a escala abaixo) cobre só uns
+         poucos km ao redor da âncora — e perto do Equador 1° de latitude e
+         1° de longitude valem quase o mesmo em metros (erro <1% em ±6° de
+         lat), então não precisa de projeção real, só regra de três.
+         Usa X (avanço ao longo do corredor) E trackZ(x) (deslocamento
+         lateral) — a MESMA função que desenha os trilhos na cena 3D — como
+         se X fosse "norte" e Z fosse "leste" a partir da âncora. Assim o
+         ponto no mapa segue a curva de verdade, não uma reta, e "retorna ao
+         início" sozinho: como X vem direto de trainGroup.position.x (que já
+         salta de +LOOP/2 pra -LOOP/2 a cada volta, sem transição — ver
+         animate()), o ponto convertido salta junto, sem nenhuma lógica
+         extra de reset. */
+      var GPS_METERS_PER_UNIT = 10; // 1 unidade Three.js = 10 metros
+      var GPS_METERS_PER_DEGREE_LAT = 111320; // metros por grau de latitude, ~constante
+      var GPS_METERS_PER_DEGREE_LON = GPS_METERS_PER_DEGREE_LAT * Math.cos(GPS_BASE_LAT * Math.PI / 180); // perto do Equador, quase igual à latitude
+      function trainWorldXToLatLon(worldX) {
+        var north = worldX * GPS_METERS_PER_UNIT;
+        var east = trackZ(worldX) * GPS_METERS_PER_UNIT;
+        return {
+          lat: GPS_BASE_LAT + north / GPS_METERS_PER_DEGREE_LAT,
+          lon: GPS_BASE_LON + east / GPS_METERS_PER_DEGREE_LON
+        };
+      }
+
+      var gpsMap = null, gpsTrainMarker = null;
+      function initGpsMap() {
+        if (gpsMap || typeof L === 'undefined') return;
+        gpsMap = L.map('ghMiniCanvas', {
+          center: [GPS_BASE_LAT, GPS_BASE_LON], zoom: 15,
+          zoomControl: false, attributionControl: false, dragging: false,
+          scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false,
+          keyboard: false, touchZoom: false, tap: false
+        });
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19, attribution: '&copy; OpenStreetMap'
+        }).addTo(gpsMap);
+
+        // Traçado da via projetado no mapa real — amostra a MESMA trackZ(x)
+        // usada na cena 3D (mesmo passo de amostragem que o antigo minimapa
+        // em canvas usava), então o desenho não pode divergir de onde o
+        // trilho realmente está. Duplo traço (lastro largo + trilho fino por
+        // cima) pra ler como ferrovia, não como estrada genérica.
+        var trackLatLngs = [];
+        for (var sx = -LOOP / 2; sx <= LOOP / 2; sx += 2) {
+          var tp = trainWorldXToLatLon(sx);
+          trackLatLngs.push([tp.lat, tp.lon]);
+        }
+        L.polyline(trackLatLngs, { color: '#c47848', weight: 9, opacity: 0.85, interactive: false }).addTo(gpsMap);
+        L.polyline(trackLatLngs, { color: '#28282c', weight: 3, opacity: 0.9, interactive: false }).addTo(gpsMap);
+
+        // Pórtico SPECTRA fixo em x=0 (trecho reto do traçado, por
+        // construção — trackZ(0)=0) — mesma referência estática que o
+        // minimapa em canvas desenhava antes.
+        var gantry = trainWorldXToLatLon(0);
+        L.circleMarker([gantry.lat, gantry.lon], {
+          radius: 6, color: '#c9d900', weight: 2, fillColor: '#c9d900', fillOpacity: 0.9
+        }).addTo(gpsMap).bindTooltip('Pórtico SPECTRA · KM 341', { direction: 'top', offset: [0, -6] });
+
+        gpsTrainMarker = L.marker([GPS_BASE_LAT, GPS_BASE_LON], {
+          icon: L.divIcon({ className: 'gps-train-marker', html: '<span></span>', iconSize: [16, 16], iconAnchor: [8, 8] }),
+          interactive: false
+        }).addTo(gpsMap);
+      }
+      function updateGpsMarker(worldX) {
+        if (!gpsMap) return;
+        var p = trainWorldXToLatLon(worldX);
+        var latLng = [p.lat, p.lon];
+        gpsTrainMarker.setLatLng(latLng);
+        gpsMap.panTo(latLng, { animate: false });
+      }
+      window.addEventListener('resize', function () { if (gpsMap && gameMode) gpsMap.invalidateSize(); });
 
       var alertFlashTimer = 0;      // flash de luz do pórtico
       var edgeLedAlertTimer = 0;    // LED do gabinete de edge computing vira vermelho
@@ -7749,7 +7819,7 @@
               ax.bboxMat.color.setHex(CANDIDATE_COLOR_HEX);
               ax.cornerMat.color.setHex(CANDIDATE_COLOR_HEX);
             } else if (ax.cascadePhase === 'candidate') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_CANDIDATE_TIME) {
                 ax.cascadePhase = 'segmenting';
                 ax.cascadeTimer = 0;
@@ -7757,14 +7827,14 @@
                   : (ax.health === 'LEAK' ? (0.86 + Math.random() * 0.11) : (0.55 + Math.random() * 0.20));
               }
             } else if (ax.cascadePhase === 'segmenting') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_SEG_TIME) {
                 ax.cascadePhase = 'analyzing';
                 ax.cascadeTimer = 0;
                 ax.temporalScore = ax.contaminated ? (0.35 + Math.random() * 0.20) : Math.min(1, 0.75 + prox * 0.30);
               }
             } else if (ax.cascadePhase === 'analyzing') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_ANALYZE_TIME) {
                 ax.cnnScore = ax.contaminated ? (0.20 + Math.random() * 0.25)
                   : (ax.health === 'LEAK' ? (0.85 + Math.random() * 0.12) : (0.04 + Math.random() * 0.14));
@@ -7949,6 +8019,7 @@
         leakAx.cascadePhase = 'confirmed';
         leakAx.bboxMat.color.setHex(leakAx.finalColorHex);
         leakAx.cornerMat.color.setHex(leakAx.finalColorHex);
+        emitAlertPayload(leakAx);
         handleConfirmedLeak(leakAx);
         return { ok: true, eventId: leakAx.lastEventId, totalEvents: INSPECTION_EVENTS.length };
       };
