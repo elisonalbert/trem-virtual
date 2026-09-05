@@ -6,6 +6,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SPECTRA | Solluria — Demonstrador Técnico v3</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- Leaflet: minimapa GPS real, 100% frontend (tiles públicos OpenStreetMap, sem backend) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
   <style>
     :root {
       --bg: #0a0b0d;
@@ -1639,10 +1642,31 @@
       border: 2px solid rgba(255, 255, 255, 0.16);
     }
 
-    #ghMinimap canvas {
+    /* Era <canvas>, agora é uma <div> hospedando o mapa Leaflet — o container
+       precisa ocupar 100% do círculo de #ghMinimap igual antes, e o fundo cobre
+       o instante entre o layout aplicar e os tiles chegarem. */
+    #ghMinimap #ghMiniCanvas {
       display: block;
       width: 100%;
       height: 100%;
+      background: #1a1d1a;
+    }
+
+    #ghMinimap .leaflet-container {
+      background: #1a1d1a;
+      font-family: inherit;
+    }
+
+    /* Marcador do trem no mapa real — mesmo estilo (branco por fora, azul por
+       dentro) do ponto que o minimapa em canvas desenhava. */
+    .gps-train-marker span {
+      display: block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #4aa3ff;
+      border: 2px solid #fff;
+      box-shadow: 0 0 6px rgba(74, 163, 255, 0.9);
     }
 
     #ghDriver {
@@ -1946,7 +1970,7 @@
         <span class="gh-unit">t · Minério</span>
       </div>
 
-      <div id="ghMinimap" class="gh-panel"><canvas id="ghMiniCanvas" width="392" height="392"></canvas></div>
+      <div id="ghMinimap" class="gh-panel" title="Mapa: dados © colaboradores OpenStreetMap"><div id="ghMiniCanvas"></div></div>
 
       <div id="ghDriver" class="gh-panel">
         <div id="ghThrottleHint"><b>[E]</b> <span id="ghDriveState">Modo Maquinista (Ativar)</span></div>
@@ -2741,6 +2765,16 @@
           button.classList.toggle('active', button.dataset.pipSource === source);
         });
         document.getElementById('pipState').textContent = source === 'lower' ? 'INFERIOR · LIVE' : 'SUPERIOR · LIVE';
+        // Contraparte física do "INFERIOR · LIVE" do HUD: o LED da carcaça
+        // inferior acende quando essa é a fonte selecionada. lowerCamLedMats
+        // é preenchido em makeLowerCameraHousing (pode estar vazio se esta
+        // função rodar antes da cena montar — daí o guard).
+        if (typeof lowerCamLedMats !== 'undefined') {
+          lowerCamLedMats.forEach(function (m) {
+            m.emissive.setHex(source === 'lower' ? 0x39e07a : 0x000000);
+            m.color.setHex(source === 'lower' ? 0x8effc0 : 0x2a3a2a);
+          });
+        }
       }
 
       document.querySelectorAll('[data-pip-source]').forEach(function (button) {
@@ -3655,6 +3689,9 @@
         bendGeometryAlongTrack(geo);
         var m = new THREE.Mesh(geo, railMat);
         m.castShadow = true; m.receiveShadow = true;
+        // Marcado pra pickInspectionCamera() ignorar no raycast de oclusão
+        // (ver uso em isRailTrack acima da função).
+        m.userData.isRailTrack = true;
         return m;
       }
       world.add(makeRail(-0.72));
@@ -4019,7 +4056,7 @@
 
       var dirtRoadTex = makeDirtRoadTexture();
       var dirtRoadBumpTex = makeGroundBumpTexture();
-      dirtRoadBumpTex.repeat.set(TRACK_HALF * 3.5, 2); // eixos trocados junto com a reorientação da estrada
+      dirtRoadBumpTex.repeat.copy(dirtRoadTex.repeat); // tem que casar com o repeat do diffuse (40,2) — ficou em (TRACK_HALF*3.5, 2) por engano, 26x mais denso
       var dirtRoadMat = new THREE.MeshStandardMaterial({ map: dirtRoadTex, bumpMap: dirtRoadBumpTex, bumpScale: 0.09, roughness: 1 });
       // Mesma correção de orientação das faixas de grama: era 3.4 em X por 190 em
       // Z, ou seja atravessada. Agora corre ao longo da via e acompanha a curva —
@@ -4182,6 +4219,455 @@
       trunks.count = ti; fronds.count = fi; treeShadows.count = ti;
       fronds.instanceColor.needsUpdate = true;
       world.add(trunks, fronds, treeShadows);
+
+      /* ============================================================
+         MATA DE TRANSIÇÃO — árvores folhosas de copa densa
+      ==============================================================
+         As palmeiras acima (babaçu) sozinhas leem como "coqueiral", não como o
+         bioma de Carajás, que é transição amazônica/cerrado: copa densa e
+         fechada, portes muito diferentes no mesmo trecho, verde que varia de
+         claro a quase seco. Este bloco acrescenta essa camada.
+
+         Três decisões carregam o sistema inteiro:
+
+         1. CHUNKS ESPACIAIS. Um único InstancedMesh com milhares de árvores
+            espalhadas por 600 unidades tem bounding sphere do tamanho da cena —
+            o frustum culling do Three.js nunca consegue descartá-lo, mesmo com a
+            câmera olhando pro lado oposto. Dividindo em tiles de VEG_CHUNK_SIZE,
+            cada InstancedMesh ganha uma esfera pequena e o culling volta a
+            funcionar. É por isso que os chunks vêm ANTES do LOD na lista: eles já
+            pagam o próprio custo só com o culling.
+
+         2. LOD POR CHUNK, não por árvore. Trocar LOD por árvore exigiria
+            reescrever matrizes de instância todo quadro (caro pra milhares).
+            Alternando a visibilidade do par near/far de cada chunk, o custo por
+            quadro é O(nº de chunks) — algumas dezenas de comparações.
+
+         3. COPA COMO GEOMETRIA MESCLADA. A copa não é uma esfera só: são 5-6
+            aglomerados deformados mesclados numa única geometria, o que dá o
+            volume em camadas sem custar um draw call por aglomerado. Três
+            variantes distintas evitam a leitura de "mesma árvore copiada".
+      ------------------------------------------------------------- */
+
+      // --- Parâmetros ajustáveis -------------------------------------------
+      var VEG_TREE_COUNT = 1400;      // teto de árvores folhosas (o filtro de área reduz o efetivo)
+      var VEG_CHUNK_SIZE = 95;        // lado do tile espacial: menor = culling melhor, mais draw calls
+      var VEG_LOD_DISTANCE = 130;     // distância (câmera→centro do chunk) que troca detalhado por impostor
+      var VEG_CLEARANCE = 15.0;       // clareira da faixa de domínio, medida da linha de centro
+      var VEG_NEAR_BAND = 75;         // até aqui a densidade é cheia
+      var VEG_FAR_KEEP = 0.5;         // fração mantida além da faixa próxima (rareia com a distância)
+      var VEG_SCALE_MIN = 0.7, VEG_SCALE_MAX = 1.85;  // variação de porte
+      var VEG_TILT = 0.09;            // inclinação máxima do tronco, em radianos
+      var VEG_LOD_INTERVAL = 0.25;    // segundos entre reavaliações de LOD (não precisa ser por quadro)
+
+      // --- Ruído determinístico (mulberry32) -------------------------------
+      // Seed fixa: a floresta é sorteada, mas é SEMPRE a mesma floresta. Sem
+      // isso, cada reload muda a silhueta do horizonte e qualquer comparação
+      // visual antes/depois vira chute.
+      function vegRng(seed) {
+        var a = seed >>> 0;
+        return function () {
+          a |= 0; a = (a + 0x6D2B79F5) | 0;
+          var t = Math.imul(a ^ (a >>> 15), 1 | a);
+          t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+          return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+      }
+
+      /* Merge manual de BufferGeometry. O r128 só traz mergeBufferGeometries em
+         examples/jsm, que este arquivo não carrega (é three.min.js puro do CDN).
+         Como todas as geometrias aqui têm o mesmo conjunto de atributos,
+         concatenar os arrays (depois de desindexar) resolve. */
+      function mergeGeos(geos) {
+        var flat = [], i;
+        for (i = 0; i < geos.length; i++) flat.push(geos[i].index ? geos[i].toNonIndexed() : geos[i]);
+        var total = 0;
+        for (i = 0; i < flat.length; i++) total += flat[i].attributes.position.count;
+        var pos = new Float32Array(total * 3);
+        var nor = new Float32Array(total * 3);
+        var uv = new Float32Array(total * 2);
+        var o3 = 0, o2 = 0;
+        for (i = 0; i < flat.length; i++) {
+          var g = flat[i];
+          pos.set(g.attributes.position.array, o3);
+          nor.set(g.attributes.normal.array, o3);
+          uv.set(g.attributes.uv.array, o2);
+          o3 += g.attributes.position.array.length;
+          o2 += g.attributes.uv.array.length;
+        }
+        var out = new THREE.BufferGeometry();
+        out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+        out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        return out;
+      }
+
+      // --- Texturas procedurais --------------------------------------------
+      /* Casca: sulcos verticais, que é o que o olho lê como "tronco" mesmo de
+         longe. Faixas de largura irregular + grão escuro por cima, no mesmo
+         espírito da textura de lastro (muitos pontos pequenos, não traços
+         isolados). */
+      function makeBarkTexture() {
+        var c = makeCanvas(64, 256), ctx = c.getContext('2d');
+        ctx.fillStyle = '#4a3a28';
+        ctx.fillRect(0, 0, 64, 256);
+        for (var i = 0; i < 26; i++) {
+          var x = Math.random() * 64, w = 1 + Math.random() * 4;
+          ctx.fillStyle = Math.random() < 0.5 ? 'rgba(30,22,14,0.55)' : 'rgba(112,92,64,0.4)';
+          ctx.fillRect(x, 0, w, 256);
+        }
+        for (var j = 0; j < 900; j++) {
+          ctx.fillStyle = 'rgba(24,18,12,' + (0.1 + Math.random() * 0.25) + ')';
+          ctx.fillRect(Math.random() * 64, Math.random() * 256, 1 + Math.random() * 2, 1 + Math.random() * 6);
+        }
+        // musgo/líquen na face sombreada — quebra a leitura de tubo pintado
+        for (var k = 0; k < 40; k++) {
+          ctx.fillStyle = 'rgba(78,96,52,0.22)';
+          ctx.beginPath();
+          ctx.arc(Math.random() * 64, Math.random() * 256, 2 + Math.random() * 5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        var tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(2, 1);
+        return tex;
+      }
+
+      /* Folhagem: manchas de tom sobrepostas, do verde-claro ao verde muito
+         escuro, com uma minoria puxando pro amarelado/seco. Sem isso a copa fica
+         com cor chapada e denuncia geometria de baixo polígono. */
+      function makeCanopyTexture() {
+        var c = makeCanvas(256, 256), ctx = c.getContext('2d');
+        ctx.fillStyle = '#2f5320';
+        ctx.fillRect(0, 0, 256, 256);
+        var tones = ['#3f6b28', '#4f8a2e', '#27441a', '#5f9636', '#7a8f3a', '#8a8340'];
+        for (var i = 0; i < 1500; i++) {
+          ctx.fillStyle = tones[Math.floor(Math.random() * tones.length)];
+          ctx.globalAlpha = 0.25 + Math.random() * 0.5;
+          ctx.beginPath();
+          ctx.arc(Math.random() * 256, Math.random() * 256, 3 + Math.random() * 13, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1;
+        // vãos escuros: buracos entre as folhas, dão profundidade à copa
+        for (var j = 0; j < 90; j++) {
+          ctx.fillStyle = 'rgba(12,22,10,0.5)';
+          ctx.beginPath();
+          ctx.arc(Math.random() * 256, Math.random() * 256, 2 + Math.random() * 6, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        var tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        return tex;
+      }
+
+      /* Impostor do LOD distante: silhueta de árvore recortada em alpha, usada em
+         dois planos cruzados. Só entra além de VEG_LOD_DISTANCE, onde a árvore
+         ocupa poucos pixels e a diferença pra geometria real não é perceptível. */
+      function makeTreeImpostorTexture() {
+        var c = makeCanvas(128, 128), ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, 128, 128);
+        ctx.fillStyle = '#4a3a28';
+        ctx.fillRect(60, 74, 9, 54);                       // tronco
+        var blobs = [[64, 46, 30], [46, 58, 22], [84, 58, 21], [58, 30, 18], [78, 34, 16]];
+        for (var b = 0; b < blobs.length; b++) {
+          var grad = ctx.createRadialGradient(blobs[b][0], blobs[b][1], 0, blobs[b][0], blobs[b][1], blobs[b][2]);
+          grad.addColorStop(0, 'rgba(79,138,46,1)');
+          grad.addColorStop(0.7, 'rgba(47,83,32,1)');
+          grad.addColorStop(1, 'rgba(39,68,26,0)');
+          ctx.fillStyle = grad;
+          ctx.beginPath(); ctx.arc(blobs[b][0], blobs[b][1], blobs[b][2], 0, Math.PI * 2); ctx.fill();
+        }
+        return new THREE.CanvasTexture(c);
+      }
+
+      var barkTex = makeBarkTexture();
+      var canopyTex = makeCanopyTexture();
+      var treeImpostorTex = makeTreeImpostorTexture();
+
+      var treeTrunkMat = new THREE.MeshStandardMaterial({ map: barkTex, roughness: 0.95, metalness: 0 });
+      /* Copa: DoubleSide porque a folhagem é uma casca e o sol precisa "vazar"
+         pelo lado de dentro; emissive verde muito baixo simula a translucência
+         da folha contra a luz direta sem custar um passe de subsurface. NÃO usa
+         transparent: com milhares de instâncias, o custo de ordenação por
+         profundidade e o overdraw comeriam o ganho todo dos chunks — a leitura
+         de folhagem vem da textura e da silhueta em aglomerados. */
+      var treeCanopyMat = new THREE.MeshStandardMaterial({
+        map: canopyTex, roughness: 0.86, metalness: 0,
+        side: THREE.DoubleSide, emissive: 0x1a2e12, emissiveIntensity: 0.55
+      });
+      /* Impostor: três escolhas, todas por custo de pixel, não por aparência.
+         · alphaTest em vez de transparent — recorta o pixel sem entrar na fila de
+           transparência (sem ordenação por profundidade, sem overdraw ordenado).
+         · Lambert em vez de Standard — a árvore está a 130+ unidades e ocupa
+           poucos pixels; o PBR completo (BRDF, roughness, IBL) não muda nada ali
+           e é o shader mais caro da cena por fragmento.
+         · FrontSide em vez de DoubleSide — os dois planos cruzados já cobrem
+           todos os ângulos; DoubleSide só dobraria a rasterização.
+         Só a copa PRÓXIMA (treeCanopyMat) fica com DoubleSide + emissive, que é
+         onde a translucência sob luz direta realmente se vê. */
+      var treeImpostorMat = new THREE.MeshLambertMaterial({
+        map: treeImpostorTex, transparent: false, alphaTest: 0.5,
+        side: THREE.FrontSide
+      });
+
+      // --- Geometrias -------------------------------------------------------
+      /* Tronco: cone truncado com ruído radial por anel e leve deriva lateral
+         subindo. Um CylinderGeometry puro lê como poste; o deslocamento
+         irregular é o que dá silhueta de árvore. */
+      function makeTreeTrunkGeometry(rng) {
+        var g = new THREE.CylinderGeometry(0.16, 0.34, 3.6, 6, 2);
+        var p = g.attributes.position, v = new THREE.Vector3();
+        for (var i = 0; i < p.count; i++) {
+          v.fromBufferAttribute(p, i);
+          var t = (v.y + 1.8) / 3.6;                       // 0 na base, 1 no topo
+          var wob = 1 + (rng() - 0.5) * 0.22;              // engrossa/afina irregular
+          var drift = (rng() - 0.5) * 0.10 * t;            // tronco não sobe reto
+          p.setXYZ(i, v.x * wob + drift, v.y, v.z * wob + drift);
+        }
+        g.computeVertexNormals();
+        g.translate(0, 1.8, 0);                            // pivô na base: facilita assentar no terreno
+        return g;
+      }
+
+      /* Copa em aglomerados: 5-6 icosaedros deformados, em alturas e raios
+         diferentes, mesclados numa geometria só. É isso que evita a "bola verde
+         única" — a silhueta ganha reentrâncias reais, não é um envelope liso. */
+      function makeTreeCanopyGeometry(rng) {
+        var parts = [];
+        var blobs = 5 + Math.floor(rng() * 2);
+        for (var b = 0; b < blobs; b++) {
+          // detail 0 (20 triângulos) e não 1 (80): o volume da copa vem do
+          // número de aglomerados e da deformação, não da subdivisão — a
+          // silhueta facetada some sob a textura de folhagem.
+          var ico = new THREE.IcosahedronGeometry(0.85 + rng() * 0.75, 0);
+          var p = ico.attributes.position, v = new THREE.Vector3();
+          for (var i = 0; i < p.count; i++) {
+            v.fromBufferAttribute(p, i);
+            v.multiplyScalar(0.8 + rng() * 0.42);          // amassa cada aglomerado
+            p.setXYZ(i, v.x, v.y * 0.82, v.z);             // achata: copa é mais larga que alta
+          }
+          ico.computeVertexNormals();
+          var ang = (b / blobs) * Math.PI * 2 + rng() * 0.8;
+          var spread = b === 0 ? 0 : 0.75 + rng() * 0.7;
+          ico.translate(Math.cos(ang) * spread, 3.5 + rng() * 1.15, Math.sin(ang) * spread);
+          parts.push(ico);
+        }
+        return mergeGeos(parts);
+      }
+
+      // Dois planos cruzados: a árvore distante continua legível de qualquer
+      // ângulo, sem precisar girar o billboard pra câmera todo quadro.
+      function makeTreeImpostorGeometry() {
+        var a = new THREE.PlaneGeometry(3.4, 4.4);
+        a.translate(0, 2.2, 0);
+        var b = a.clone();
+        b.rotateY(Math.PI / 2);
+        return mergeGeos([a, b]);
+      }
+
+      var vegSeedRng = vegRng(20260904);
+      var TRUNK_VARIANTS = [], CANOPY_VARIANTS = [];
+      for (var vg = 0; vg < 3; vg++) {
+        TRUNK_VARIANTS.push(makeTreeTrunkGeometry(vegRng(1000 + vg * 77)));
+        CANOPY_VARIANTS.push(makeTreeCanopyGeometry(vegRng(2000 + vg * 131)));
+      }
+      var vegImpostorGeo = makeTreeImpostorGeometry();
+
+      /* --- Distribuição: grid com jitter -----------------------------------
+         Poisson disk de verdade seria O(n) com grade de aceleração, mas o
+         resultado visual aqui é indistinguível de uma grade com jitter forte —
+         que custa uma passada só e nunca falha em convergir. Uma candidata por
+         célula, deslocada aleatoriamente dentro dela: o espaçamento mínimo vem
+         de graça (duas árvores nunca ocupam a mesma célula) e o padrão de grade
+         some porque o deslocamento é quase do tamanho da célula.
+
+         A densidade cai com a distância da via (VEG_NEAR_BAND/VEG_FAR_KEEP):
+         perto da área navegável a mata é cheia, no fundo ela rareia — que é onde
+         o impostor assume e o custo tem que ser menor mesmo. */
+      var vegCandidates = [];
+      var VEG_CELL = 9.5;
+      var vegHalf = TRACK_HALF - 4;
+      for (var vgx = -vegHalf; vgx < vegHalf; vgx += VEG_CELL) {
+        for (var vgz = -vegHalf; vgz < vegHalf; vgz += VEG_CELL) {
+          var jx = vgx + vegSeedRng() * VEG_CELL;
+          var jz = vgz + vegSeedRng() * VEG_CELL;
+          var aoff = Math.abs(offsetFromTrack(jx, jz));
+          if (aoff < VEG_CLEARANCE) continue;              // faixa de domínio limpa
+          if (inRiverZone(jx, 4)) continue;                // nada dentro do rio
+          if (Math.abs(jx) > vegHalf || Math.abs(jz) > vegHalf) continue;
+          if (aoff > VEG_NEAR_BAND && vegSeedRng() > VEG_FAR_KEEP) continue;
+          vegCandidates.push({ x: jx, z: jz, d: aoff });
+        }
+      }
+      // Embaralha (Fisher-Yates, mesma seed) antes de cortar no teto: sem isso o
+      // corte seguiria a ordem do grid e deixaria metade do mapa pelada.
+      for (var vsh = vegCandidates.length - 1; vsh > 0; vsh--) {
+        var vsj = Math.floor(vegSeedRng() * (vsh + 1));
+        var vtmp = vegCandidates[vsh]; vegCandidates[vsh] = vegCandidates[vsj]; vegCandidates[vsj] = vtmp;
+      }
+      vegCandidates.length = Math.min(vegCandidates.length, VEG_TREE_COUNT);
+
+      // --- Agrupamento por chunk -------------------------------------------
+      var vegChunks = {};
+      for (var vci = 0; vci < vegCandidates.length; vci++) {
+        var vcand = vegCandidates[vci];
+        var vkey = Math.floor(vcand.x / VEG_CHUNK_SIZE) + '|' + Math.floor(vcand.z / VEG_CHUNK_SIZE);
+        if (!vegChunks[vkey]) vegChunks[vkey] = [];
+        vegChunks[vkey].push(vcand);
+      }
+
+      /* --- Construção dos InstancedMesh por chunk --------------------------
+         Cada chunk vira: até 3 pares tronco+copa (um por variante de silhueta) e
+         um impostor cobrindo as mesmas árvores. O que muda entre near e far é
+         apenas qual grupo está visível — decidido por distância em
+         updateVegetationLOD(). */
+      var vegChunkList = [];
+      var vegDummy = new THREE.Object3D();
+      var vegColor = new THREE.Color();
+      var VEG_GREEN_A = new THREE.Color(0x86a860);   // verde claro de folha nova
+      var VEG_GREEN_B = new THREE.Color(0x4a6e34);   // verde fechado de mata
+      var VEG_DRY = new THREE.Color(0xa89a52);       // toque seco/amarelado
+
+      Object.keys(vegChunks).forEach(function (vkey2) {
+        var list = vegChunks[vkey2];
+        var parts2 = vkey2.split('|');
+        var rng = vegRng(Math.abs(parts2[0] * 7919 + parts2[1] * 104729) + 17);
+
+        var buckets = [[], [], []];
+        for (var bi = 0; bi < list.length; bi++) buckets[Math.floor(rng() * 3)].push(list[bi]);
+
+        var near = new THREE.Group();
+        var far = new THREE.Group();
+        var cx = 0, cz = 0;
+
+        for (var b = 0; b < 3; b++) {
+          if (!buckets[b].length) continue;
+          var trunkIM = new THREE.InstancedMesh(TRUNK_VARIANTS[b], treeTrunkMat, buckets[b].length);
+          var canopyIM = new THREE.InstancedMesh(CANOPY_VARIANTS[b], treeCanopyMat, buckets[b].length);
+          /* castShadow fica DESLIGADO de propósito. O passe do shadow map é
+             renderizado do ponto de vista da luz direcional, cujo frustum cobre a
+             cena toda — o culling por chunk não age nele, então cada árvore extra
+             entraria no passe de sombra inteira. Medido: com sombra ligada a
+             vegetação custava ~11ms/quadro; sem, cai pra fração disso. As
+             palmeiras existentes também não projetam sombra (só o decal de
+             contato), então isto mantém a coerência do que já havia. */
+          trunkIM.castShadow = false;
+          canopyIM.castShadow = false;
+          for (var t = 0; t < buckets[b].length; t++) {
+            var tr = buckets[b][t];
+            var s = VEG_SCALE_MIN + rng() * (VEG_SCALE_MAX - VEG_SCALE_MIN);
+            cx += tr.x; cz += tr.z;
+
+            vegDummy.position.set(tr.x, terrainHeight(tr.x, tr.z), tr.z);
+            vegDummy.rotation.set((rng() - 0.5) * VEG_TILT, rng() * 6.283, (rng() - 0.5) * VEG_TILT);
+            vegDummy.scale.set(s, s * (0.85 + rng() * 0.4), s);   // altura varia mais que a largura
+            vegDummy.updateMatrix();
+            trunkIM.setMatrixAt(t, vegDummy.matrix);
+            canopyIM.setMatrixAt(t, vegDummy.matrix);
+
+            /* Cor por instância: mistura os dois verdes e puxa pro seco numa
+               minoria. Perto da via entra a MESMA poeira de minério que já suja
+               as palmeiras (greenDusty, definido no bloco acima) — a mata não
+               pode estar limpa onde o resto do corredor está vermelho. */
+            vegColor.copy(VEG_GREEN_A).lerp(VEG_GREEN_B, rng());
+            if (rng() < 0.14) vegColor.lerp(VEG_DRY, 0.35 + rng() * 0.3);
+            var dust = THREE.MathUtils.clamp(1 - (tr.d - VEG_CLEARANCE) / 10, 0, 1);
+            if (dust > 0) vegColor.lerp(greenDusty, dust * 0.45);
+            canopyIM.setColorAt(t, vegColor);
+          }
+          canopyIM.instanceColor.needsUpdate = true;
+          near.add(trunkIM, canopyIM);
+        }
+
+        // Impostor: uma instância por árvore do chunk, 4 triângulos cada.
+        var impIM = new THREE.InstancedMesh(vegImpostorGeo, treeImpostorMat, list.length);
+        for (var pi = 0; pi < list.length; pi++) {
+          var pt = list[pi];
+          var ps = VEG_SCALE_MIN + rng() * (VEG_SCALE_MAX - VEG_SCALE_MIN);
+          vegDummy.position.set(pt.x, terrainHeight(pt.x, pt.z), pt.z);
+          vegDummy.rotation.set(0, rng() * 6.283, 0);
+          vegDummy.scale.set(ps, ps, ps);
+          vegDummy.updateMatrix();
+          impIM.setMatrixAt(pi, vegDummy.matrix);
+        }
+        far.add(impIM);
+        far.visible = false;
+
+        world.add(near, far);
+        vegChunkList.push({
+          near: near, far: far,
+          cx: cx / Math.max(1, list.length),
+          cz: cz / Math.max(1, list.length)
+        });
+      });
+
+      /* Troca near/far por distância. Roda a cada VEG_LOD_INTERVAL segundos, não
+         por quadro: a câmera não anda rápido o bastante pra que 4Hz apareça, e
+         isso tira o laço do caminho crítico. O frustum culling do Three.js
+         continua agindo por cima, em cada InstancedMesh de chunk. */
+      var vegLodTimer = 0;
+      var vegCamPos = new THREE.Vector3();
+      function updateVegetationLOD(dt) {
+        vegLodTimer -= dt;
+        if (vegLodTimer > 0) return;
+        vegLodTimer = VEG_LOD_INTERVAL;
+        camera.getWorldPosition(vegCamPos);
+        for (var i = 0; i < vegChunkList.length; i++) {
+          var ch = vegChunkList[i];
+          var ddx = ch.cx - vegCamPos.x, ddz = ch.cz - vegCamPos.z;
+          var isNear = (ddx * ddx + ddz * ddz) < VEG_LOD_DISTANCE * VEG_LOD_DISTANCE;
+          if (ch.near.visible !== isNear) {
+            ch.near.visible = isNear;
+            ch.far.visible = !isNear;
+          }
+        }
+      }
+      updateVegetationLOD(999);   // primeira classificação antes do primeiro quadro
+
+      /* Custo real da vegetação, medido por A/B no MESMO processo: mede, esconde
+         todos os chunks, mede de novo, restaura. Comparar duas versões do arquivo
+         em recargas separadas não funciona — a variância do ambiente (GPU
+         compartilhada, compilação de shader, térmica) é maior que o efeito que se
+         quer medir. Aqui as duas amostras saem do mesmo instante e da mesma GPU
+         quente, então a diferença é atribuível só à vegetação. */
+      window.__vegCost = function (n) {
+        n = n || 40;
+        function medir() {
+          var xs = [];
+          for (var k = 0; k < 5; k++) xs.push(window.__renderCost(n).msPorQuadro);
+          xs.sort(function (a, b) { return a - b; });
+          return xs[2];   // mediana de 5
+        }
+        var comVeg = medir();
+        var estados = vegChunkList.map(function (c) { return [c.near.visible, c.far.visible]; });
+        vegChunkList.forEach(function (c) { c.near.visible = false; c.far.visible = false; });
+        var semVeg = medir();
+        vegChunkList.forEach(function (c, i) { c.near.visible = estados[i][0]; c.far.visible = estados[i][1]; });
+        return {
+          comVegetacao_ms: +comVeg.toFixed(2),
+          semVegetacao_ms: +semVeg.toFixed(2),
+          custoDaVegetacao_ms: +(comVeg - semVeg).toFixed(2)
+        };
+      };
+
+      window.__vegStats = function () {
+        var near = 0, far = 0;
+        for (var i = 0; i < vegChunkList.length; i++) { if (vegChunkList[i].near.visible) near++; else far++; }
+        return {
+          arvoresFolhosas: vegCandidates.length,
+          palmeiras: ti,
+          chunks: vegChunkList.length,
+          chunksDetalhados: near,
+          chunksImpostor: far,
+          parametros: {
+            VEG_TREE_COUNT: VEG_TREE_COUNT, VEG_CHUNK_SIZE: VEG_CHUNK_SIZE,
+            VEG_LOD_DISTANCE: VEG_LOD_DISTANCE, VEG_CLEARANCE: VEG_CLEARANCE,
+            VEG_NEAR_BAND: VEG_NEAR_BAND, VEG_FAR_KEEP: VEG_FAR_KEEP
+          }
+        };
+      };
+
 
       // postes elétricos acompanhando a via — elemento clássico de corredor
       // ferroviário real, agora mais perto da via e com detalhamento técnico
@@ -4598,34 +5084,552 @@
       var camOverview = new THREE.PerspectiveCamera(50, 640 / 400, 0.1, 60); // visão geral do pórtico, de cima
       camInspL.position.set(0.15, 5.05, -0.9);
       camInspR.position.set(0.15, 5.05, 0.9);
-      camLowerL.position.set(-1.25, -1.35, 0.50);
-      camLowerR.position.set(-1.25, -1.35, -0.50);
       camOverview.position.set(-4.2, 8.5, 0);
       camInspL.lookAt(new THREE.Vector3(0, 0.42, -1.05));
       camInspR.lookAt(new THREE.Vector3(0, 0.42, 1.05));
-      camLowerL.lookAt(new THREE.Vector3(0, 0.46, -1.05));
-      camLowerR.lookAt(new THREE.Vector3(0, 0.46, 1.05));
       camOverview.lookAt(new THREE.Vector3(0, 0.42, 0));
-      legL.add(camLowerL);
-      legR.add(camLowerR);
-      camLowerL.lookAt(new THREE.Vector3(0, 0.46, -1.05));
-      camLowerR.lookAt(new THREE.Vector3(0, 0.46, 1.05));
-      scene.add(camInspL, camInspR, camOverview);
 
-      function makeLowerCameraHousing(side) {
+      /* --- Câmeras wayside INFERIORES: montagem lateral ao nível do lastro ---
+         FONTE ÚNICA de posição/mira: tanto a THREE.PerspectiveCamera que
+         renderiza a evidência quanto a carcaça 3D visível (makeLowerCameraHousing)
+         leem deste mesmo array. Assim é impossível a câmera renderizar de um
+         ponto e o objeto visual estar em outro.
+
+         Por que aqui e não embaixo da via: antes ficavam em y=-1.35, ou seja
+         ENTERRADAS (o terreno é plano em y=0 nesta faixa — terrainHeight()
+         retorna 0 dentro de FLAT_HALF_Z, e o lastro ocupa y de -0.5 a 0). Não
+         existia poço modelado, então nem a carcaça aparecia na cena nem a
+         câmera tinha linha de visão: o raio subia através de lastro e trilho.
+         Detector de caixa quente real é montado assim mesmo — caixa junto à
+         via, FORA do gabarito, apontando pra dentro e pra cima em direção ao
+         mancal. z=±1.95 fica fora do trilho (±0.72) e fora do próprio mancal
+         (±1.05); y=0.18 apoia no topo do lastro; x=-0.55 dá o ângulo oblíquo
+         que mostra a FACE do mancal, não só o perfil. */
+      var LOWER_CAM_RIGS = [
+        { side: -1, pos: new THREE.Vector3(-0.55, 0.18, -1.95), target: new THREE.Vector3(0, 0.46, -1.05) },
+        { side: 1, pos: new THREE.Vector3(-0.55, 0.18, 1.95), target: new THREE.Vector3(0, 0.46, 1.05) }
+      ];
+      camLowerL.position.copy(LOWER_CAM_RIGS[0].pos);
+      camLowerR.position.copy(LOWER_CAM_RIGS[1].pos);
+      camLowerL.lookAt(LOWER_CAM_RIGS[0].target);
+      camLowerR.lookAt(LOWER_CAM_RIGS[1].target);
+      // BUG (causa raiz #1 do vazamento sempre capturado pela câmera
+      // "errada"): camLowerL/R foram escritas acima com coordenadas de
+      // MUNDO (mesmo padrão de camInspL/R/camOverview, que vão direto pra
+      // scene) mas estavam sendo anexadas como filhas de legL/legR —
+      // reinterpretando esse mesmo offset como LOCAL à perna do pórtico
+      // (que fica em y=2.7). Resultado: camLowerL parava de fato em
+      // (-1.25, 1.35, -2.35) — ACIMA do chão e encostada na própria viga —
+      // em vez de (-1.25, -1.35, 0.50), o ponto abaixo da via que o "de
+      // baixo pra cima" da câmera inferior pressupõe. pickInspectionCamera()
+      // então sempre reportava "bloqueada" pra ela (o raycast batia na viga
+      // a ~1.3 unidades de distância, todo eixo, toda vez), caindo pro
+      // fallback — por isso a captura nunca vinha da câmera inferior mesmo
+      // com ela selecionada no toggle Wayside. Corrigido adicionando as
+      // duas direto na scene, como as outras (linha abaixo).
+      camInspL.userData.housing = cam1;
+      camInspR.userData.housing = cam2;
+      scene.add(camInspL, camInspR, camLowerL, camLowerR, camOverview);
+
+      /* Carcaça física da câmera wayside inferior. Lê a MESMA entrada de
+         LOWER_CAM_RIGS que a PerspectiveCamera correspondente, então o que
+         se vê na cena é literalmente de onde a evidência é renderizada.
+         Segue o vocabulário visual do resto do pórtico: corpo em aço sujo
+         (housingMat), lente escura (lensMat), para-sol chanfrado e pedestal
+         curto descendo até o lastro — mesma linguagem das carcaças
+         superiores (makeCameraHousing) e da caixa UV (makeUVHousing). */
+      var lowerCamLedMats = [];
+      function makeLowerCameraHousing(rig) {
         var housing = new THREE.Group();
-        var body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.24, 0.28), housingMat);
-        var lens = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.08, 12), lensMat);
+
+        var body = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.22, 0.26), housingMat);
+        body.castShadow = true;
+
+        // Lente aponta no +X local; housing.lookAt() gira o grupo pro mancal.
+        var lens = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.085, 0.07, 14), lensMat);
         lens.rotation.z = Math.PI / 2;
-        lens.position.x = 0.24;
-        housing.add(body, lens);
-        housing.position.set(-1.25, -1.35, -side * 0.50);
-        housing.lookAt(new THREE.Vector3(0, 0.46, side * 1.05));
-        housing.castShadow = true;
+        lens.position.x = 0.20;
+        lens.castShadow = true;
+
+        // Para-sol: chapa curta por cima da lente, contra sol rasante e poeira
+        // de minério — o mesmo motivo pelo qual as carcaças de cima têm anel.
+        var hood = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.02, 0.24), housingMat);
+        hood.position.set(0.20, 0.115, 0);
+        hood.castShadow = true;
+
+        // LED de status (item "INFERIOR · LIVE" do HUD tem contraparte física).
+        var ledMat = new THREE.MeshStandardMaterial({ color: 0x2a3a2a, emissive: 0x000000, roughness: 0.35, metalness: 0.1 });
+        var led = new THREE.Mesh(new THREE.SphereGeometry(0.022, 10, 8), ledMat);
+        led.position.set(-0.10, 0.12, 0.09);
+        lowerCamLedMats.push(ledMat);
+
+        // Pedestal: do corpo até o topo do lastro (y=0), pra carcaça não
+        // parecer flutuando. Altura derivada da própria cota da câmera.
+        var pedestalH = rig.pos.y;
+        var pedestal = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.06, pedestalH, 10), housingMat);
+        pedestal.castShadow = true;
+
+        housing.add(body, lens, hood, led);
+        housing.position.copy(rig.pos);
+        housing.lookAt(rig.target);
         gantry.add(housing);
+
+        // Pedestal fica FORA do grupo girado: ele é vertical no mundo, não
+        // acompanha a inclinação da mira da câmera.
+        pedestal.position.set(rig.pos.x, rig.pos.y - pedestalH / 2 - 0.06, rig.pos.z);
+        gantry.add(pedestal);
+
+        return housing;
       }
-      makeLowerCameraHousing(-1);
-      makeLowerCameraHousing(1);
+      // BUG (causa raiz #2, auto-oclusão): a câmera REAL de inspeção ocupa
+      // a MESMA posição de mundo da sua carcaça decorativa aqui embaixo
+      // (ambas usam side*0.50/side*1.05 nas mesmas contas — ver cam1/cam2
+      // acima pro par superior, mesma história). Sem excluir essa carcaça
+      // do raycast de pickInspectionCamera(), o primeiro raio SEMPRE batia
+      // nela mesma a curta distância (~1.3 unidades), reportando "bloqueada"
+      // mesmo com linha de visão livre pro rolamento — em QUALQUER eixo,
+      // sempre. userData.housing é lido junto da exclusão de ax.group.
+      camLowerL.userData.housing = makeLowerCameraHousing(LOWER_CAM_RIGS[0]);
+      camLowerR.userData.housing = makeLowerCameraHousing(LOWER_CAM_RIGS[1]);
+
+      /* ============================================================
+         SEGURANÇA PATRIMONIAL — isolamento pontual das áreas sensíveis
+      ==============================================================
+         Três ilhas independentes, sem cerca contínua ligando uma à outra:
+         pórtico wayside, subestação (transformador) e portaria de acesso.
+
+         Duas restrições de layout mandam no desenho e explicam as escolhas:
+
+         · A VIA NÃO PODE SER FECHADA. Um retângulo em volta do pórtico
+           atravessaria os trilhos. Instalação real resolve com cerca PARALELA à
+           via dos dois lados, deixando a linha correr — é o que está feito aqui.
+           Só a subestação e a portaria, que ficam fora do gabarito, ganham
+           perímetro fechado.
+
+         · TUDO SEGUE A CURVA. Nada é posicionado em x/z absoluto: as posições
+           saem de trackPos(x, lateral) e o rumo de trackHeading(x), a mesma
+           fonte que desenha trilho e lastro. Fixar z absoluto faria a cerca
+           encostar no trilho num trecho e ficar longe noutro.
+
+         Faixas laterais já ocupadas (a cerca precisa caber entre elas):
+           lastro até ±3,5 · postes/transformadores em −7,4 · estrada em +13,5
+      ------------------------------------------------------------- */
+
+      // --- Parâmetros ajustáveis por área ----------------------------------
+      var SEC_GANTRY_X0 = -11, SEC_GANTRY_X1 = 11;   // extensão da cerca do pórtico ao longo da via
+      var SEC_GANTRY_LATERAL = 5.6;                  // afastamento da linha de centro (cabe entre lastro e postes)
+      var SEC_TRAFO_HALF_X = 7;                      // meia-extensão do perímetro da subestação
+      var SEC_TRAFO_LAT_IN = -4.4, SEC_TRAFO_LAT_OUT = -10.6; // faixa lateral cercada da subestação
+      var SEC_GATE_X = -34;                          // portaria: posição ao longo da via
+      var SEC_GATE_LATERAL = 13.5;                   // sobre a estrada de acesso existente
+      var SEC_FENCE_H = 2.4;                         // altura da cerca
+      var SEC_POST_SPACING = 3.0;                    // vão entre mourões
+      var SEC_LED_HZ = 0.55;                         // frequência do LED das CFTV
+
+      // --- Texturas procedurais --------------------------------------------
+      /* Alambrado: a malha é desenhada como duas famílias de diagonais cruzadas
+         sobre fundo transparente. Vai como alphaTest (não transparent) pelo mesmo
+         motivo dos impostores de árvore — recorta o pixel sem entrar na fila de
+         transparência, que com dezenas de painéis custaria ordenação por
+         profundidade a cada quadro. */
+      function makeChainLinkTexture() {
+        var c = makeCanvas(64, 64), ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, 64, 64);
+        ctx.strokeStyle = 'rgba(196,201,208,0.95)';
+        ctx.lineWidth = 2.2;
+        for (var i = -64; i < 128; i += 16) {
+          ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + 64, 64); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(i + 64, 0); ctx.lineTo(i, 64); ctx.stroke();
+        }
+        var tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        return tex;
+      }
+
+      /* Placa de aviso: canvas 2D com fillText. A mesma função serve pra "ÁREA
+         RESTRITA" (amarela), "RISCO ELÉTRICO" (amarela com o triângulo e o raio
+         desenhados à mão) e "PROIBIDA A ENTRADA" (vermelha) — nenhuma imagem
+         externa. */
+      function makeSignTexture(linhas, bg, fg, comRaio) {
+        var c = makeCanvas(256, 176), ctx = c.getContext('2d');
+        ctx.fillStyle = bg; ctx.fillRect(0, 0, 256, 176);
+        ctx.strokeStyle = fg; ctx.lineWidth = 7; ctx.strokeRect(6, 6, 244, 164);
+        if (comRaio) {
+          ctx.fillStyle = fg;
+          ctx.beginPath(); ctx.moveTo(128, 26); ctx.lineTo(168, 92); ctx.lineTo(88, 92); ctx.closePath(); ctx.fill();
+          ctx.fillStyle = bg;
+          ctx.beginPath();
+          ctx.moveTo(132, 42); ctx.lineTo(116, 70); ctx.lineTo(127, 70);
+          ctx.lineTo(120, 88); ctx.lineTo(140, 62); ctx.lineTo(129, 62); ctx.closePath();
+          ctx.fill();
+        }
+        ctx.fillStyle = fg;
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        var y0 = comRaio ? 122 : 68;
+        for (var i = 0; i < linhas.length; i++) {
+          ctx.font = '700 ' + (linhas[i].length > 14 ? 23 : 30) + 'px sans-serif';
+          ctx.fillText(linhas[i], 128, y0 + i * 33);
+        }
+        return new THREE.CanvasTexture(c);
+      }
+
+      var chainLinkTex = makeChainLinkTexture();
+      var secFenceMat = new THREE.MeshStandardMaterial({
+        map: chainLinkTex, alphaTest: 0.35, transparent: false,
+        side: THREE.DoubleSide, roughness: 0.55, metalness: 0.65, color: 0xb9c0c9
+      });
+      var secPostMat = new THREE.MeshStandardMaterial({ color: 0x8d949c, roughness: 0.6, metalness: 0.7 });
+      var secConcertinaMat = new THREE.MeshStandardMaterial({ color: 0xc6ccd4, roughness: 0.45, metalness: 0.8 });
+      var secBodyMat = new THREE.MeshStandardMaterial({ color: 0x2b3138, roughness: 0.55, metalness: 0.4 });
+      var secWhiteMat = new THREE.MeshStandardMaterial({ color: 0xdfe3ea, roughness: 0.7, metalness: 0.1 });
+      var secLedBaseMat = new THREE.MeshStandardMaterial({ color: 0x3a1416, emissive: 0xff2222, emissiveIntensity: 1.2, roughness: 0.4 });
+
+      var secGroup = new THREE.Group();
+      world.add(secGroup);
+      var secDummy = new THREE.Object3D();
+      var secLedMats = [];        // LEDs de CFTV — piscam em updateSecurity()
+      var secNightLamps = [];     // halos dos postes de luz — acendem à noite
+
+      /* --- Cerca: trecho reto acompanhando a via ---------------------------
+         Painéis + mourões, ambos em InstancedMesh: 2 (ou 3, com concertina) draw
+         calls por trecho, independente do comprimento. `comConcertina` adiciona
+         os anéis no topo — só nas áreas de maior criticidade, como pedido. */
+      function buildFenceRun(x0, x1, lateral, comConcertina) {
+        var g = new THREE.Group();
+        var vaos = Math.max(1, Math.round((x1 - x0) / SEC_POST_SPACING));
+        var passo = (x1 - x0) / vaos;
+
+        // repeat proporcional ao vão: a malha tem que ter o mesmo passo físico em
+        // qualquer trecho, senão trechos curtos saem com a malha esticada.
+        var panelMat = secFenceMat.clone();
+        panelMat.map = chainLinkTex.clone();
+        panelMat.map.repeat.set(passo * 1.6, SEC_FENCE_H * 1.6);
+        panelMat.map.needsUpdate = true;
+
+        var panels = new THREE.InstancedMesh(new THREE.PlaneGeometry(passo, SEC_FENCE_H), panelMat, vaos);
+        var posts = new THREE.InstancedMesh(
+          new THREE.CylinderGeometry(0.055, 0.065, SEC_FENCE_H + 0.25, 6), secPostMat, vaos + 1);
+        var concertina = comConcertina
+          ? new THREE.InstancedMesh(new THREE.TorusGeometry(0.17, 0.018, 4, 9), secConcertinaMat, vaos * 3)
+          : null;
+        var ci = 0;
+
+        for (var i = 0; i < vaos; i++) {
+          var xm = x0 + passo * (i + 0.5);
+          var pm = trackPos(xm, lateral);
+          secDummy.position.set(pm.x, terrainHeight(pm.x, pm.z) + SEC_FENCE_H / 2, pm.z);
+          secDummy.rotation.set(0, -trackHeading(xm), 0);
+          secDummy.scale.set(1, 1, 1);
+          secDummy.updateMatrix();
+          panels.setMatrixAt(i, secDummy.matrix);
+
+          if (comConcertina) {
+            for (var k = 0; k < 3; k++) {
+              var xc = x0 + passo * (i + (k + 0.5) / 3);
+              var pc = trackPos(xc, lateral);
+              secDummy.position.set(pc.x, terrainHeight(pc.x, pc.z) + SEC_FENCE_H + 0.16, pc.z);
+              secDummy.rotation.set(0, -trackHeading(xc), Math.PI / 2);
+              secDummy.updateMatrix();
+              concertina.setMatrixAt(ci++, secDummy.matrix);
+            }
+          }
+        }
+        for (var p = 0; p <= vaos; p++) {
+          var xp = x0 + passo * p;
+          var pp = trackPos(xp, lateral);
+          secDummy.position.set(pp.x, terrainHeight(pp.x, pp.z) + (SEC_FENCE_H + 0.25) / 2, pp.z);
+          secDummy.rotation.set(0, -trackHeading(xp), 0);
+          secDummy.scale.set(1, 1, 1);
+          secDummy.updateMatrix();
+          posts.setMatrixAt(p, secDummy.matrix);
+        }
+        g.add(panels, posts);
+        if (comConcertina) { concertina.count = ci; g.add(concertina); }
+        return g;
+      }
+
+      /* Trecho transversal: fecha as pontas do perímetro da subestação, cruzando
+         de uma lateral à outra num x fixo. */
+      function buildFenceCross(xAt, latA, latB) {
+        var g = new THREE.Group();
+        var a = trackPos(xAt, latA), b = trackPos(xAt, latB);
+        var len = Math.sqrt((b.x - a.x) * (b.x - a.x) + (b.z - a.z) * (b.z - a.z));
+        var vaos = Math.max(1, Math.round(len / SEC_POST_SPACING));
+        var panelMat = secFenceMat.clone();
+        panelMat.map = chainLinkTex.clone();
+        panelMat.map.repeat.set((len / vaos) * 1.6, SEC_FENCE_H * 1.6);
+        panelMat.map.needsUpdate = true;
+        var panels = new THREE.InstancedMesh(new THREE.PlaneGeometry(len / vaos, SEC_FENCE_H), panelMat, vaos);
+        var posts = new THREE.InstancedMesh(
+          new THREE.CylinderGeometry(0.055, 0.065, SEC_FENCE_H + 0.25, 6), secPostMat, vaos + 1);
+        var ang = Math.atan2(b.x - a.x, b.z - a.z);
+        for (var i = 0; i < vaos; i++) {
+          var t = (i + 0.5) / vaos;
+          var px = a.x + (b.x - a.x) * t, pz = a.z + (b.z - a.z) * t;
+          secDummy.position.set(px, terrainHeight(px, pz) + SEC_FENCE_H / 2, pz);
+          secDummy.rotation.set(0, ang + Math.PI / 2, 0);
+          secDummy.scale.set(1, 1, 1);
+          secDummy.updateMatrix();
+          panels.setMatrixAt(i, secDummy.matrix);
+        }
+        for (var p = 0; p <= vaos; p++) {
+          var tp = p / vaos;
+          var qx = a.x + (b.x - a.x) * tp, qz = a.z + (b.z - a.z) * tp;
+          secDummy.position.set(qx, terrainHeight(qx, qz) + (SEC_FENCE_H + 0.25) / 2, qz);
+          secDummy.rotation.set(0, 0, 0);
+          secDummy.scale.set(1, 1, 1);
+          secDummy.updateMatrix();
+          posts.setMatrixAt(p, secDummy.matrix);
+        }
+        g.add(panels, posts);
+        return g;
+      }
+
+      /* Placa presa na cerca, virada pra fora da área. */
+      function addSecSign(xAt, lateral, linhas, bg, fg, comRaio, faceOut) {
+        var m = new THREE.Mesh(
+          new THREE.PlaneGeometry(0.94, 0.65),
+          new THREE.MeshStandardMaterial({
+            map: makeSignTexture(linhas, bg, fg, comRaio),
+            roughness: 0.75, metalness: 0.05, side: THREE.DoubleSide
+          })
+        );
+        var p = trackPos(xAt, lateral);
+        m.position.set(p.x, terrainHeight(p.x, p.z) + 1.5, p.z);
+        m.rotation.y = -trackHeading(xAt) + (faceOut ? Math.PI : 0);
+        secGroup.add(m);
+      }
+
+      /* --- CFTV: bullet sobre mastro próprio ------------------------------
+         Deliberadamente diferente das câmeras wayside de inspeção: aquelas são
+         cilindro horizontal preso à estrutura do pórtico, na cor do aço sujo, com
+         LED VERDE fixo. Esta é um corpo escuro sobre braço em L no topo de um
+         mastro fino, com LED VERMELHO piscando. Dá pra distinguir vigilância
+         patrimonial de instrumentação industrial só olhando. */
+      function addCctv(xAt, lateral, alturaMastro, apontaPraDentro) {
+        var g = new THREE.Group();
+        var p = trackPos(xAt, lateral);
+
+        var mast = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.075, alturaMastro, 8), secPostMat);
+        mast.position.set(0, alturaMastro / 2, 0);
+        mast.castShadow = true;
+        var arm = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.05, 0.05), secPostMat);
+        arm.position.set(0.25, alturaMastro, 0);
+        var body = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.34, 10), secBodyMat);
+        body.rotation.z = Math.PI / 2;
+        body.position.set(0.5, alturaMastro - 0.06, 0);
+        var hood = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.02, 0.19), secBodyMat);
+        hood.position.set(0.5, alturaMastro + 0.09, 0);
+        var glass = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.02, 10), lensMat);
+        glass.rotation.z = Math.PI / 2;
+        glass.position.set(0.68, alturaMastro - 0.06, 0);
+
+        var ledMat = secLedBaseMat.clone();
+        var led = new THREE.Mesh(new THREE.SphereGeometry(0.018, 8, 6), ledMat);
+        led.position.set(0.36, alturaMastro - 0.02, 0.06);
+        secLedMats.push(ledMat);
+
+        g.add(mast, arm, body, hood, glass, led);
+        g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
+        g.rotation.y = -trackHeading(xAt) + (apontaPraDentro ? Math.PI : 0);
+        secGroup.add(g);
+      }
+
+      /* --- Poste de iluminação de segurança -------------------------------
+         Diferente dos postes de transmissão (madeira, cruzeta, isoladores):
+         mastro metálico claro com braço curvo e luminária retangular apontando
+         pro chão. O halo só aparece à noite — ver updateSecurity(). */
+      function addSecurityLight(xAt, lateral) {
+        var g = new THREE.Group();
+        var p = trackPos(xAt, lateral);
+        var H = 6.2;
+        var mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.11, H, 8), secPostMat);
+        mast.position.y = H / 2;
+        mast.castShadow = true;
+        var arm = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 1.1, 6), secPostMat);
+        arm.rotation.z = Math.PI / 2 - 0.35;
+        arm.position.set(0.5, H - 0.12, 0);
+        var head = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.13, 0.3), secBodyMat);
+        head.position.set(1.0, H - 0.42, 0);
+        var lampMat = new THREE.MeshStandardMaterial({
+          color: 0xfff0c4, emissive: 0xffe9b0, emissiveIntensity: 0.15, roughness: 0.4
+        });
+        var lampLens = new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.24), lampMat);
+        lampLens.rotation.x = -Math.PI / 2;
+        lampLens.position.set(1.0, H - 0.49, 0);
+
+        var halo = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: makeGlowSpriteTexture('#ffe9b0'), color: 0xffe9b0,
+          transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
+        }));
+        halo.scale.set(4.2, 4.2, 1);
+        halo.position.set(1.0, H - 0.5, 0);
+        secNightLamps.push({ halo: halo, lamp: lampMat });
+
+        g.add(mast, arm, head, lampLens, halo);
+        g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
+        g.rotation.y = -trackHeading(xAt);
+        secGroup.add(g);
+      }
+
+      // ====================== ÁREA 1 — PÓRTICO ==============================
+      // Dois trechos paralelos à via, um de cada lado, SEM fechar as pontas: a
+      // linha tem que passar. Concertina nos dois (área de maior criticidade).
+      secGroup.add(buildFenceRun(SEC_GANTRY_X0, SEC_GANTRY_X1, SEC_GANTRY_LATERAL, true));
+      secGroup.add(buildFenceRun(SEC_GANTRY_X0, SEC_GANTRY_X1, -SEC_GANTRY_LATERAL, true));
+      addSecSign(-4.5, SEC_GANTRY_LATERAL, ['ÁREA RESTRITA', 'PESSOAL AUTORIZADO'], '#e8c400', '#161616', false, true);
+      addSecSign(4.5, -SEC_GANTRY_LATERAL, ['PROIBIDA A ENTRADA'], '#b31414', '#ffffff', false, false);
+      addCctv(-9.5, SEC_GANTRY_LATERAL + 0.9, 4.6, true);
+      addCctv(9.5, -(SEC_GANTRY_LATERAL + 0.9), 4.6, false);
+      addSecurityLight(-12.5, SEC_GANTRY_LATERAL + 1.6);
+
+      /* Faixa zebrada na base das colunas do pórtico. hazardMat já existe (é o
+         material das faixas de advertência da própria estrutura), então a leitura
+         fica consistente com o que a cena já usa. */
+      [-2.85, 2.85].forEach(function (lz) {
+        var bp = trackPos(0, lz);
+        var band = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.5, 0.42), hazardMat);
+        band.position.set(bp.x, terrainHeight(bp.x, bp.z) + 0.25, bp.z);
+        secGroup.add(band);
+      });
+
+      // ====================== ÁREA 2 — SUBESTAÇÃO ===========================
+      // Cerca o transformador mais próximo do pórtico. Perímetro FECHADO, que
+      // aqui é possível porque a subestação fica fora do gabarito da via.
+      var SEC_TRAFO_X = 0;
+      if (typeof transformerPositions !== 'undefined' && transformerPositions.length) {
+        SEC_TRAFO_X = transformerPositions.reduce(function (best, v) {
+          return Math.abs(v) < Math.abs(best) ? v : best;
+        }, transformerPositions[0]);
+      }
+      var secTrafoX0 = SEC_TRAFO_X - SEC_TRAFO_HALF_X, secTrafoX1 = SEC_TRAFO_X + SEC_TRAFO_HALF_X;
+      secGroup.add(buildFenceRun(secTrafoX0, secTrafoX1, SEC_TRAFO_LAT_IN, true));
+      secGroup.add(buildFenceRun(secTrafoX0, secTrafoX1, SEC_TRAFO_LAT_OUT, true));
+      secGroup.add(buildFenceCross(secTrafoX0, SEC_TRAFO_LAT_IN, SEC_TRAFO_LAT_OUT));
+      secGroup.add(buildFenceCross(secTrafoX1, SEC_TRAFO_LAT_IN, SEC_TRAFO_LAT_OUT));
+      addSecSign(SEC_TRAFO_X - 2.2, SEC_TRAFO_LAT_IN, ['RISCO ELÉTRICO', 'ALTA TENSÃO'], '#e8c400', '#161616', true, false);
+      addSecSign(SEC_TRAFO_X + 2.2, SEC_TRAFO_LAT_IN, ['ÁREA RESTRITA'], '#e8c400', '#161616', false, false);
+      addCctv(secTrafoX0 + 0.8, SEC_TRAFO_LAT_OUT - 0.8, 4.2, false);
+      addSecurityLight(SEC_TRAFO_X, SEC_TRAFO_LAT_OUT - 1.4);
+
+      var secTrafoBandP = trackPos(SEC_TRAFO_X, POLE_Z);
+      var secTrafoBand = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.42, 0.9), hazardMat);
+      secTrafoBand.position.set(secTrafoBandP.x, terrainHeight(secTrafoBandP.x, secTrafoBandP.z) + 0.21, secTrafoBandP.z);
+      secGroup.add(secTrafoBand);
+
+      // ====================== ÁREA 3 — PORTARIA =============================
+      /* Sobre a estrada de acesso existente (lateral 13.5). O portão é DESLIZANTE
+         e está modelado recuado (aberto), e a cancela está levantada: a passagem
+         da estrada continua livre, que é o requisito de não bloquear caminho já
+         usado pela navegação. */
+      (function buildGatehouse() {
+        var g = new THREE.Group();
+        var p = trackPos(SEC_GATE_X, SEC_GATE_LATERAL);
+
+        var rail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.06, 7.2), secPostMat);
+        rail.position.set(0, 0.03, 0);
+
+        var leafMat = secFenceMat.clone();
+        leafMat.map = chainLinkTex.clone();
+        leafMat.map.repeat.set(5, 3.4);
+        leafMat.map.needsUpdate = true;
+        var leaf = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 2.1), leafMat);
+        leaf.position.set(0, 1.1, 2.4);
+        leaf.rotation.y = Math.PI / 2;
+        var leafFrame = new THREE.Mesh(new THREE.BoxGeometry(0.07, 2.2, 3.3), secPostMat);
+        leafFrame.position.set(0, 1.1, 2.4);
+
+        [-1.7, 1.7].forEach(function (cz) {
+          var col = new THREE.Mesh(new THREE.BoxGeometry(0.26, 2.9, 0.26), secWhiteMat);
+          col.position.set(0, 1.45, cz);
+          col.castShadow = true;
+          g.add(col);
+        });
+
+        // Cancela levadiça, braço listrado no mesmo hazardMat das faixas de piso.
+        var pivot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.9, 0.22), secBodyMat);
+        pivot.position.set(1.6, 0.45, -2.3);
+        var boom = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.11, 0.11), hazardMat);
+        boom.position.set(1.6 + 1.55, 1.05, -2.3);
+        boom.rotation.z = 0.21;
+
+        // Guarita: caixa + janela + telhado com beiral.
+        var hutBody = new THREE.Mesh(new THREE.BoxGeometry(1.9, 2.3, 1.7), secWhiteMat);
+        hutBody.position.set(-2.6, 1.15, -2.2);
+        hutBody.castShadow = true;
+        var hutGlass = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.85), new THREE.MeshStandardMaterial({
+          color: 0x9fc4d6, roughness: 0.15, metalness: 0.5, transparent: true, opacity: 0.72, side: THREE.DoubleSide
+        }));
+        hutGlass.position.set(-1.64, 1.5, -2.2);
+        hutGlass.rotation.y = Math.PI / 2;
+        var hutRoof = new THREE.Mesh(new THREE.BoxGeometry(2.35, 0.12, 2.15), secBodyMat);
+        hutRoof.position.set(-2.6, 2.36, -2.2);
+
+        g.add(rail, leaf, leafFrame, pivot, boom, hutBody, hutGlass, hutRoof);
+        g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
+        g.rotation.y = -trackHeading(SEC_GATE_X);
+        secGroup.add(g);
+      })();
+
+      // cerca curta flanqueando a portaria, deixando o vão da estrada livre
+      secGroup.add(buildFenceRun(SEC_GATE_X + 1.9, SEC_GATE_X + 8, SEC_GATE_LATERAL, false));
+      secGroup.add(buildFenceRun(SEC_GATE_X - 8, SEC_GATE_X - 1.9, SEC_GATE_LATERAL, false));
+      addSecSign(SEC_GATE_X + 3.6, SEC_GATE_LATERAL, ['ÁREA RESTRITA', 'IDENTIFIQUE-SE'], '#e8c400', '#161616', false, true);
+      addCctv(SEC_GATE_X - 3.2, SEC_GATE_LATERAL - 1.2, 4.4, false);
+      addSecurityLight(SEC_GATE_X + 2.4, SEC_GATE_LATERAL - 1.8);
+
+      /* --- Animação: LED das CFTV e halo noturno ---------------------------
+         Pisca via emissiveIntensity em JS, não por onBeforeCompile: são poucos
+         materiais, e um shader customizado por câmera chegaria exatamente no
+         mesmo resultado visual custando mais. O halo segue o mesmo estado
+         `weather` que o resto da cena usa pra decidir se é noite. */
+      var secLedPhase = 0;
+      function updateSecurity(dt) {
+        secLedPhase += dt * SEC_LED_HZ * Math.PI * 2;
+        var on = Math.sin(secLedPhase) > 0.35 ? 1.5 : 0.09;
+        for (var i = 0; i < secLedMats.length; i++) secLedMats[i].emissiveIntensity = on;
+        var noite = (weather === 'night') ? 1 : 0;
+        for (var j = 0; j < secNightLamps.length; j++) {
+          var L = secNightLamps[j];
+          L.halo.material.opacity += (noite * 0.55 - L.halo.material.opacity) * Math.min(1, dt * 2.5);
+          L.lamp.emissiveIntensity = 0.15 + noite * 1.1;
+        }
+      }
+
+      /* Posiciona a câmera pra inspecionar cada área de segurança. Existe pelo
+         mesmo motivo de __viewCrossing: conduzir a órbita "no braço" até um ponto
+         específico é impreciso, e os parâmetros SEC_* acima só se ajustam bem
+         olhando a área de frente. */
+      window.__viewSecArea = function (area) {
+        var alvo = { portico: [0, 0], subestacao: [SEC_TRAFO_X, (SEC_TRAFO_LAT_IN + SEC_TRAFO_LAT_OUT) / 2], portaria: [SEC_GATE_X, SEC_GATE_LATERAL] }[area || "portico"];
+        if (!alvo) return "use: portico | subestacao | portaria";
+        cancelTween(); followLoco = false; cabinView = false; setWalkMode(false);
+        var c = trackPos(alvo[0], alvo[1]);
+        controlsTarget.set(c.x, terrainHeight(c.x, c.z) + 1.6, c.z);
+        var eye = trackPos(alvo[0] - 13, alvo[1] + (alvo[1] >= 0 ? 11 : -11));
+        camera.position.set(eye.x, terrainHeight(eye.x, eye.z) + 7.5, eye.z);
+        camera.lookAt(controlsTarget);
+        setSphericalFromCurrentPosition();
+        return { area: area, alvo: alvo };
+      };
+
+      window.__securityStats = function () {
+        return {
+          areas: ['portico', 'subestacao', 'portaria'],
+          cftv: secLedMats.length,
+          postesDeLuz: secNightLamps.length,
+          transformadorCercado_x: SEC_TRAFO_X,
+          parametros: {
+            SEC_GANTRY_X0: SEC_GANTRY_X0, SEC_GANTRY_X1: SEC_GANTRY_X1,
+            SEC_GANTRY_LATERAL: SEC_GANTRY_LATERAL,
+            SEC_TRAFO_HALF_X: SEC_TRAFO_HALF_X,
+            SEC_TRAFO_LAT_IN: SEC_TRAFO_LAT_IN, SEC_TRAFO_LAT_OUT: SEC_TRAFO_LAT_OUT,
+            SEC_GATE_X: SEC_GATE_X, SEC_GATE_LATERAL: SEC_GATE_LATERAL,
+            SEC_FENCE_H: SEC_FENCE_H, SEC_POST_SPACING: SEC_POST_SPACING
+          }
+        };
+      };
+
       var inspectionRaycaster = new THREE.Raycaster();
 
       var uvHousingMat = new THREE.MeshStandardMaterial({ map: darkSteelGrime, color: 0x1e1420, roughness: 0.55, metalness: 0.55 });
@@ -5922,20 +6926,263 @@
       var weather = 'clear';
       var weatherGroup = new THREE.Group();
       var uvRays = new THREE.Group();
+      /* ============================================================
+         CHUVA — cinco camadas independentes
+      ==============================================================
+         1. estrias      — Points com ShaderMaterial, volume que segue a câmera
+         2. molhamento   — roughness/cor dos materiais expostos, com manchas
+         3. poças        — planos refletindo o envMap, com ondulação animada
+         4. respingos    — micro-partículas de impacto no chão
+         5. atmosfera    — fog e névoa baixa acompanhando a intensidade
+
+         O sistema antigo era 14.000 pontos redondos num volume FIXO de
+         700x30x700 centrado na origem. Dois problemas: a densidade aparente era
+         quase nula (14k gotas diluídas em meio milhão de unidades quadradas) e,
+         como o volume não seguia a câmera, andar pra longe do centro deixava a
+         cena literalmente sem chuva. Aqui o volume é pequeno e viaja com a
+         câmera — é o que permite densidade alta com MENOS partículas. */
+
+      // --- Parâmetros ajustáveis -------------------------------------------
+      // Fallback automático: a contagem cai quando o dispositivo reporta poucos
+      // núcleos, que é o proxy mais confiável disponível no navegador sem rodar
+      // um benchmark antes de montar a cena.
+      var RAIN_LOW_END = (navigator.hardwareConcurrency || 8) <= 4;
+      var RAIN_PARTICLE_COUNT = RAIN_LOW_END ? 3500 : 9000;
+      var RAIN_VOLUME_XZ = 46;        // lado do volume que acompanha a câmera
+      var RAIN_VOLUME_Y = 26;         // altura do volume
+      var RAIN_FALL_SPEED = 26;       // velocidade base de queda (unidades/s)
+      var RAIN_SPEED_VAR = 0.45;      // variação relativa de velocidade entre gotas
+      var RAIN_WIND = 2.6;            // deriva horizontal (vento)
+      var RAIN_STREAK_LEN = 2.9;      // alongamento da estria
+      var RAIN_COLOR = new THREE.Color(0xc8dcea);
+      var RAIN_SPLASH_COUNT = RAIN_LOW_END ? 90 : 220;
+      var RAIN_PUDDLE_COUNT = 14;
+      var RAIN_WETNESS_SPEED = 0.35;  // quão rápido as superfícies molham/secam
+
+      /* ---------- 1. ESTRIAS -----------------------------------------------
+         Points + ShaderMaterial. A estria é desenhada DENTRO do point sprite: o
+         vertex shader pede um gl_PointSize grande e o fragment recorta uma faixa
+         vertical fina com falloff nas pontas. Sai mais barato que instanciar
+         quads: uma gota continua sendo um vértice só.
+
+         Cada gota carrega seus atributos (espessura, opacidade) em
+         BufferAttributes ESTÁTICOS — só `position` é reescrito por quadro, que é
+         o requisito de não recriar geometria. */
       var rainGeo = new THREE.BufferGeometry();
-      var rainCount = 14000;
+      var rainCount = RAIN_PARTICLE_COUNT;
       var rainPositions = new Float32Array(rainCount * 3);
-      var rainState = [];
-      for (var rainIndex = 0; rainIndex < rainCount; rainIndex++) {
-        rainPositions[rainIndex * 3] = (Math.random() - 0.5) * 700;
-        rainPositions[rainIndex * 3 + 1] = Math.random() * 30;
-        rainPositions[rainIndex * 3 + 2] = (Math.random() - 0.5) * 700;
-        rainState.push(Math.random());
+      var rainSpeeds = new Float32Array(rainCount);
+      var rainThick = new Float32Array(rainCount);
+      var rainAlpha = new Float32Array(rainCount);
+      for (var ri0 = 0; ri0 < rainCount; ri0++) {
+        rainPositions[ri0 * 3] = (Math.random() - 0.5) * RAIN_VOLUME_XZ;
+        rainPositions[ri0 * 3 + 1] = Math.random() * RAIN_VOLUME_Y;
+        rainPositions[ri0 * 3 + 2] = (Math.random() - 0.5) * RAIN_VOLUME_XZ;
+        // Variação por gota: sem isso a cortina inteira cai no mesmo compasso e
+        // lê como padrão mecânico, não como chuva.
+        rainSpeeds[ri0] = 1 - RAIN_SPEED_VAR * 0.5 + Math.random() * RAIN_SPEED_VAR;
+        rainThick[ri0] = 0.55 + Math.random() * 0.75;
+        rainAlpha[ri0] = 0.35 + Math.random() * 0.65;
       }
       rainGeo.setAttribute('position', new THREE.BufferAttribute(rainPositions, 3));
-      var rainMat = new THREE.PointsMaterial({ color: 0xf2fbff, size: 0.5, transparent: true, opacity: 0, depthWrite: false, fog: false });
+      rainGeo.setAttribute('aThick', new THREE.BufferAttribute(rainThick, 1));
+      rainGeo.setAttribute('aAlpha', new THREE.BufferAttribute(rainAlpha, 1));
+      rainGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), RAIN_VOLUME_XZ);
+
+      var rainMat = new THREE.ShaderMaterial({
+        uniforms: {
+          uOpacity: { value: 0 },
+          uColor: { value: RAIN_COLOR.clone() },
+          uStreak: { value: RAIN_STREAK_LEN },
+          uSize: { value: 26.0 }
+        },
+        transparent: true,
+        depthWrite: false,
+        vertexShader: [
+          'attribute float aThick;',
+          'attribute float aAlpha;',
+          'varying float vThick;',
+          'varying float vAlpha;',
+          'uniform float uSize;',
+          'void main() {',
+          '  vThick = aThick;',
+          '  vAlpha = aAlpha;',
+          '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+          '  gl_PointSize = uSize * aThick / max(0.5, -mv.z) * 6.0;',
+          '  gl_Position = projectionMatrix * mv;',
+          '}'
+        ].join('\n'),
+        fragmentShader: [
+          'uniform float uOpacity;',
+          'uniform vec3 uColor;',
+          'uniform float uStreak;',
+          'varying float vThick;',
+          'varying float vAlpha;',
+          'void main() {',
+          '  vec2 p = gl_PointCoord - 0.5;',
+          '  float fx = abs(p.x) * (7.0 / vThick);',
+          '  float fy = abs(p.y) * (2.0 / uStreak);',
+          '  float d = 1.0 - clamp(fx * fx + fy * fy, 0.0, 1.0);',
+          '  if (d <= 0.001) discard;',
+          '  float head = smoothstep(-0.5, 0.35, p.y);',
+          '  gl_FragColor = vec4(uColor, d * d * vAlpha * uOpacity * (0.45 + 0.55 * head));',
+          '}'
+        ].join('\n')
+      });
       var rainPoints = new THREE.Points(rainGeo, rainMat);
+      rainPoints.frustumCulled = false;   // o volume acompanha a câmera
       weatherGroup.add(rainPoints);
+
+      /* ---------- 2. MOLHAMENTO -------------------------------------------
+         Superfície molhada tem dois efeitos ópticos: escurece (a água preenche
+         os poros e a luz entra em vez de espalhar) e fica especular (roughness
+         cai). Os dois são interpolados por `rainWetness`, com os valores SECOS
+         guardados na entrada — assim secar devolve exatamente o material
+         original, sem deriva depois de várias trocas de clima.
+
+         A textura de manchas evita o escurecimento chapado: entra como
+         roughnessMap, então parte da superfície fica poça-brilhante e parte
+         continua fosca, que é como terra e brita molham de verdade. */
+      function makeWetPatchTexture() {
+        var c = makeCanvas(256, 256), ctx = c.getContext('2d');
+        ctx.fillStyle = '#b9b9b9';           // base: bem áspero (seco)
+        ctx.fillRect(0, 0, 256, 256);
+        for (var i = 0; i < 130; i++) {
+          var x = Math.random() * 256, y = Math.random() * 256, r = 8 + Math.random() * 34;
+          var g = ctx.createRadialGradient(x, y, 0, x, y, r);
+          g.addColorStop(0, 'rgba(30,30,30,0.85)');   // escuro = liso = molhado
+          g.addColorStop(1, 'rgba(30,30,30,0)');
+          ctx.fillStyle = g;
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        }
+        var tex = new THREE.CanvasTexture(c);
+        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(9, 9);
+        return tex;
+      }
+      var wetPatchTex = makeWetPatchTexture();
+
+      // Materiais expostos à chuva, com o estado seco preservado.
+      var wetTargets = [];
+      function registerWetTarget(mat, escurecimento, roughnessMolhada) {
+        if (!mat) return;
+        wetTargets.push({
+          mat: mat,
+          corSeca: mat.color ? mat.color.clone() : null,
+          roughSeca: mat.roughness,
+          escurece: escurecimento,
+          roughMolhada: roughnessMolhada
+        });
+      }
+      registerWetTarget(ballastMat, 0.55, 0.34);
+      registerWetTarget(dirtRoadMat, 0.5, 0.4);
+      registerWetTarget(railMat, 0.8, 0.12);
+
+      /* ---------- 3. POÇAS -------------------------------------------------
+         Planos quase espelhados (metalness alto, roughness baixo) usando o
+         envMap que a cena já mantém atualizado — é o que faz a poça devolver o
+         céu e as luzes em vez de virar mancha escura. A ondulação vem de um
+         onBeforeCompile que empurra a normal com duas senoides cruzadas: mesmo
+         padrão de shader customizado já usado na graxa reativa a UV, sem
+         precisar de normal map em arquivo. */
+      var puddleMat = new THREE.MeshStandardMaterial({
+        color: 0x223038, roughness: 0.06, metalness: 0.85,
+        envMap: envRenderTarget.texture, envMapIntensity: 1.15,
+        transparent: true, opacity: 0, depthWrite: false
+      });
+      puddleMat.userData.uTime = { value: 0 };
+      puddleMat.onBeforeCompile = function (shader) {
+        shader.uniforms.uTime = puddleMat.userData.uTime;
+        shader.vertexShader = 'varying vec2 vPuddleUv;\n' + shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n  vPuddleUv = uv;'
+        );
+        shader.fragmentShader = 'uniform float uTime;\nvarying vec2 vPuddleUv;\n' + shader.fragmentShader.replace(
+          '#include <normal_fragment_maps>',
+          [
+            '#include <normal_fragment_maps>',
+            // Duas senoides cruzadas em frequências diferentes: o batimento
+            // entre elas evita a leitura de grade regular que uma senoide só
+            // produziria.
+            'float w1 = sin(vPuddleUv.x * 38.0 + uTime * 2.1) * cos(vPuddleUv.y * 31.0 - uTime * 1.7);',
+            'float w2 = sin((vPuddleUv.x + vPuddleUv.y) * 57.0 - uTime * 3.3);',
+            'normal = normalize(normal + vec3(w1 * 0.055, 0.0, w2 * 0.045));'
+          ].join('\n')
+        );
+      };
+
+      var puddleGroup = new THREE.Group();
+      world.add(puddleGroup);
+      /* Poças só em terreno plano e fora da via: terrainHeight()==0 marca a
+         plataforma nivelada, e o afastamento mínimo evita poça em cima do
+         lastro (que drena) ou do trilho. */
+      (function seedPuddles() {
+        var rng = vegRng(90210);
+        var postas = 0, tentativas = 0;
+        while (postas < RAIN_PUDDLE_COUNT && tentativas < RAIN_PUDDLE_COUNT * 40) {
+          tentativas++;
+          var px = (rng() - 0.5) * 120;
+          var lat = (rng() < 0.5 ? -1 : 1) * (5.5 + rng() * 9);
+          var pp = trackPos(px, lat);
+          if (terrainHeight(pp.x, pp.z) > 0.01) continue;      // só em piso plano
+          if (inRiverZone(px, 6)) continue;
+          var m = new THREE.Mesh(new THREE.CircleGeometry(1.1 + rng() * 2.6, 18), puddleMat);
+          m.rotation.x = -Math.PI / 2;
+          m.rotation.z = rng() * Math.PI;
+          m.scale.set(1, 0.55 + rng() * 0.8, 1);               // elipses, não círculos perfeitos
+          m.position.set(pp.x, 0.012, pp.z);                   // 12mm acima do piso: sem z-fighting
+          puddleGroup.add(m);
+          postas++;
+        }
+      })();
+
+      /* ---------- 4. RESPINGOS ---------------------------------------------
+         Micro-partículas de impacto num pool fixo. Nascem no piso perto da
+         câmera (é onde o olho registra o impacto), sobem pouco e morrem rápido.
+         Pool fixo + reciclagem = zero alocação por quadro. */
+      var splashGeo = new THREE.BufferGeometry();
+      var splashPos = new Float32Array(RAIN_SPLASH_COUNT * 3);
+      var splashVel = new Float32Array(RAIN_SPLASH_COUNT * 3);
+      var splashLife = new Float32Array(RAIN_SPLASH_COUNT);
+      splashGeo.setAttribute('position', new THREE.BufferAttribute(splashPos, 3));
+      splashGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 60);
+      var splashMat = new THREE.PointsMaterial({
+        color: 0xd6e8f2, size: 0.055, transparent: true, opacity: 0,
+        depthWrite: false, sizeAttenuation: true, fog: false
+      });
+      var splashPoints = new THREE.Points(splashGeo, splashMat);
+      splashPoints.frustumCulled = false;
+      weatherGroup.add(splashPoints);
+
+      /* ---------- 5. NÉVOA BAIXA -------------------------------------------
+         Camada rasa de partículas grandes e difusas logo acima do piso — a
+         leitura de "chuva pesada levantando bruma". Usa a mesma textura de glow
+         que o resto da cena já gera. */
+      var groundMistCount = RAIN_LOW_END ? 26 : 60;
+      var groundMistGeo = new THREE.BufferGeometry();
+      var groundMistPos = new Float32Array(groundMistCount * 3);
+      for (var gm = 0; gm < groundMistCount; gm++) {
+        groundMistPos[gm * 3] = (Math.random() - 0.5) * 70;
+        groundMistPos[gm * 3 + 1] = 0.5 + Math.random() * 1.4;
+        groundMistPos[gm * 3 + 2] = (Math.random() - 0.5) * 70;
+      }
+      groundMistGeo.setAttribute('position', new THREE.BufferAttribute(groundMistPos, 3));
+      groundMistGeo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 70);
+      var groundMistMat = new THREE.PointsMaterial({
+        map: makeGlowSpriteTexture('#cfdae2'), color: 0xcfdae2,
+        size: 11, transparent: true, opacity: 0, depthWrite: false,
+        sizeAttenuation: true, fog: false
+      });
+      var groundMist = new THREE.Points(groundMistGeo, groundMistMat);
+      groundMist.frustumCulled = false;
+      weatherGroup.add(groundMist);
+
+      // --- Estado compartilhado --------------------------------------------
+      var rainIntensity = 0;            // 0..1, dirige TODAS as camadas do efeito
+      var rainWetness = 0;              // 0 = seco, 1 = encharcado
+      var rainCamPos = new THREE.Vector3();
+      var rainSplashCursor = 0;
+
 
       var mistMat = new THREE.MeshBasicMaterial({ color: 0xd8e2e2, transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending });
       var mist = new THREE.Mesh(new THREE.PlaneGeometry(42, 8), mistMat);
@@ -5963,23 +7210,119 @@
 
       function updateWeather(dt) {
         var rainActive = weather === 'rain';
-        rainMat.opacity = lerp(rainMat.opacity, rainActive ? 1 : 0, 0.12);
-        mistMat.opacity = 0;
+        var alvo = rainActive ? 1 : 0;
+
+        /* Intensidade global: sobe/desce suave. Tudo que a chuva afeta lê deste
+           valor, então a transição entre climas é uma coisa só, não seis fades
+           independentes que podem sair de sincronia. */
+        rainIntensity += (alvo - rainIntensity) * Math.min(1, dt * 1.6);
+        // Molhar é rápido, secar é lento — chão encharcado não seca em 2s.
+        var taxaWet = alvo > rainWetness ? RAIN_WETNESS_SPEED * 2.2 : RAIN_WETNESS_SPEED * 0.5;
+        rainWetness += (alvo - rainWetness) * Math.min(1, dt * taxaWet * 3);
+
+        rainMat.uniforms.uOpacity.value = rainIntensity * 0.85;
         if (rainSoundGain && audioCtx) {
           rainSoundGain.gain.setTargetAtTime(rainActive && soundEnabled ? 0.055 : 0, audioCtx.currentTime, 0.18);
         }
-        for (var ri = 0; ri < rainCount; ri++) {
-          var rainY = rainPositions[ri * 3 + 1] - dt * (rainActive ? 12 : 3);
-            rainPositions[ri * 3 + 1] = rainY < 0 ? 30 : rainY;
-          rainPositions[ri * 3] += dt * 0.7;
+
+        // ---------- 1. estrias: queda + reciclagem em volta da câmera --------
+        camera.getWorldPosition(rainCamPos);
+        rainPoints.position.set(rainCamPos.x, 0, rainCamPos.z);
+        if (rainIntensity > 0.004) {
+          var meia = RAIN_VOLUME_XZ * 0.5;
+          var vento = RAIN_WIND * dt;
+          for (var ri = 0; ri < rainCount; ri++) {
+            var b = ri * 3;
+            rainPositions[b + 1] -= dt * RAIN_FALL_SPEED * rainSpeeds[ri];
+            rainPositions[b] += vento;
+            /* Reciclagem: as coordenadas são LOCAIS ao rainPoints, que está
+               travado no x/z da câmera — então basta devolver a gota ao topo e
+               reembaralhar x/z dentro do volume. É isso que faz a chuva parecer
+               infinita sem popping: o observador nunca alcança a borda. */
+            if (rainPositions[b + 1] < -2) {
+              rainPositions[b + 1] = RAIN_VOLUME_Y + Math.random() * 4;
+              rainPositions[b] = (Math.random() - 0.5) * RAIN_VOLUME_XZ;
+              rainPositions[b + 2] = (Math.random() - 0.5) * RAIN_VOLUME_XZ;
+            } else if (rainPositions[b] > meia) {
+              rainPositions[b] -= RAIN_VOLUME_XZ;    // vento empurrou pra fora: entra do outro lado
+            }
+          }
+          rainGeo.attributes.position.needsUpdate = true;
         }
-        rainGeo.attributes.position.needsUpdate = true;
+
+        // ---------- 2. molhamento das superfícies ---------------------------
+        for (var wi = 0; wi < wetTargets.length; wi++) {
+          var W = wetTargets[wi];
+          if (W.corSeca) W.mat.color.copy(W.corSeca).multiplyScalar(1 - W.escurece * rainWetness);
+          W.mat.roughness = W.roughSeca + (W.roughMolhada - W.roughSeca) * rainWetness;
+        }
+
+        // ---------- 3. poças -------------------------------------------------
+        puddleMat.opacity = rainWetness * 0.92;
+        puddleGroup.visible = rainWetness > 0.02;
+        puddleMat.userData.uTime.value = realElapsed;
+
+        // ---------- 4. respingos ---------------------------------------------
+        splashMat.opacity = rainIntensity * 0.75;
+        if (rainIntensity > 0.15) {
+          // Poucos nascimentos por quadro: o efeito lê como respingo esparso, e
+          // o custo fica preso ao tamanho do pool, não à área da cena.
+          var nascer = Math.min(6, Math.ceil(rainIntensity * 6));
+          for (var ns = 0; ns < nascer; ns++) {
+            var idx = rainSplashCursor++ % RAIN_SPLASH_COUNT;
+            var ang = Math.random() * 6.283, rad = Math.random() * 16;
+            var sx = rainCamPos.x + Math.cos(ang) * rad;
+            var sz = rainCamPos.z + Math.sin(ang) * rad;
+            splashPos[idx * 3] = sx;
+            splashPos[idx * 3 + 1] = terrainHeight(sx, sz) + 0.02;
+            splashPos[idx * 3 + 2] = sz;
+            splashVel[idx * 3] = (Math.random() - 0.5) * 0.5;
+            splashVel[idx * 3 + 1] = 0.9 + Math.random() * 0.8;
+            splashVel[idx * 3 + 2] = (Math.random() - 0.5) * 0.5;
+            splashLife[idx] = 0.28 + Math.random() * 0.16;   // vida curta: é pingo, não faísca
+          }
+        }
+        for (var sp = 0; sp < RAIN_SPLASH_COUNT; sp++) {
+          if (splashLife[sp] <= 0) continue;
+          splashLife[sp] -= dt;
+          var sb = sp * 3;
+          splashVel[sb + 1] -= dt * 7.5;                      // gravidade
+          splashPos[sb] += splashVel[sb] * dt;
+          splashPos[sb + 1] += splashVel[sb + 1] * dt;
+          splashPos[sb + 2] += splashVel[sb + 2] * dt;
+          // some pra debaixo do piso quando morre, em vez de ficar parado no ar
+          if (splashLife[sp] <= 0) splashPos[sb + 1] = -999;
+        }
+        splashGeo.attributes.position.needsUpdate = true;
+
+        // ---------- 5. atmosfera ---------------------------------------------
+        groundMist.position.set(rainCamPos.x, 0, rainCamPos.z);
+        groundMistMat.opacity = rainIntensity * 0.16;
+        groundMist.visible = rainIntensity > 0.02;
+
         var rayOpacity = (state === 'uv' || state === 'weber') ? emitterOutputFactor : 0;
         uvRays.children.forEach(function (ray, index) {
           ray.material.uniforms.uOpacity.value = lerp(ray.material.uniforms.uOpacity.value, rayOpacity, 0.1);
           ray.scale.x = 1 + Math.sin(realElapsed * 10 + index) * 0.06;
         });
       }
+
+      window.__rainStats = function () {
+        return {
+          particulas: rainCount,
+          respingos: RAIN_SPLASH_COUNT,
+          pocas: puddleGroup.children.length,
+          dispositivoFraco: RAIN_LOW_END,
+          intensidade: +rainIntensity.toFixed(3),
+          molhamento: +rainWetness.toFixed(3),
+          parametros: {
+            RAIN_PARTICLE_COUNT: RAIN_PARTICLE_COUNT, RAIN_VOLUME_XZ: RAIN_VOLUME_XZ,
+            RAIN_VOLUME_Y: RAIN_VOLUME_Y, RAIN_FALL_SPEED: RAIN_FALL_SPEED,
+            RAIN_WIND: RAIN_WIND, RAIN_STREAK_LEN: RAIN_STREAK_LEN,
+            RAIN_SPLASH_COUNT: RAIN_SPLASH_COUNT, RAIN_PUDDLE_COUNT: RAIN_PUDDLE_COUNT
+          }
+        };
+      };
 
       var lastEffSpeed = TRAIN_SPEED_BASE;
       var allSpawnPoints = axles.concat(plainAxles);
@@ -6084,7 +7427,7 @@
         walkMode = on;
         document.getElementById('walkModeBtn').classList.toggle('active', on);
         if (on) {
-          cancelTween(); breakFollow();
+          cancelTween(); breakFollow(); cabinView = false;
           var dir = new THREE.Vector3().subVectors(controlsTarget, camera.position).normalize();
           walkYaw = Math.atan2(-dir.x, -dir.z);
           walkPitch = THREE.MathUtils.clamp(Math.asin(dir.y), -1.4, 1.4);
@@ -6175,6 +7518,7 @@
         dom.style.cursor = panning ? 'move' : 'grabbing';
         cancelTween();
         breakFollow();
+        interruptDroneTour();
       });
       window.addEventListener('mouseup', function () { dragging = false; dom.style.cursor = 'grab'; });
       window.addEventListener('mousemove', function (e) {
@@ -6207,13 +7551,14 @@
         e.preventDefault();
         cancelTween();
         breakFollow();
+        interruptDroneTour();
         spherical.radius *= (1 + e.deltaY * 0.0011);
         spherical.radius = THREE.MathUtils.clamp(spherical.radius, minRadius, maxRadius);
       }, { passive: false });
 
       var touchLast = null, pinchLast = null;
       dom.addEventListener('touchstart', function (e) {
-        cancelTween(); breakFollow();
+        cancelTween(); breakFollow(); interruptDroneTour();
         if (e.touches.length === 1) { touchLast = { x: e.touches[0].clientX, y: e.touches[0].clientY }; }
         else if (e.touches.length === 2) {
           var dx = e.touches[0].clientX - e.touches[1].clientX, dy = e.touches[0].clientY - e.touches[1].clientY;
@@ -6265,6 +7610,7 @@
         if (droneTourTimer) clearTimeout(droneTourTimer);
         switchTab('3d');
         hideIntro();
+        setGuidedMode(false); // evita que o ciclo do Demo Guiado troque `state` por baixo do tour
         droneTourActive = true;
         simulationPaused = false;
         followLoco = false; cabinView = false;
@@ -6284,6 +7630,7 @@
                 tourAxle.segScore = 0.9; tourAxle.temporalScore = 0.95; tourAxle.cnnScore = 0.92;
                 tourAxle.confidence = 0.93; tourAxle.contaminated = false; tourAxle.cascadePhase = 'confirmed';
                 tourAxle.bboxMat.color.setHex(tourAxle.finalColorHex); tourAxle.cornerMat.color.setHex(tourAxle.finalColorHex);
+                emitAlertPayload(tourAxle);
                 handleConfirmedLeak(tourAxle);
               }
               simulationPaused = true;
@@ -6296,6 +7643,18 @@
             }, 1700);
           }, 2600);
         }, 2100);
+      }
+      function interruptDroneTour() {
+        // Interação manual (arrastar/zoom/toque) assume o controle: cancela os
+        // setTimeout pendentes do Tour Drone sem forçar a câmera de volta pro
+        // overview — sem isso, um dos callbacks agendados (followLoco, flyTo,
+        // pausa) dispara segundos depois e atropela a câmera que o usuário
+        // acabou de pegar manualmente.
+        if (!droneTourActive) return;
+        if (droneTourTimer) { clearTimeout(droneTourTimer); droneTourTimer = null; }
+        droneTourActive = false;
+        simulationPaused = false;
+        document.getElementById('droneTourBtn').textContent = '▶ Tour Drone';
       }
       function stopDroneTour() {
         if (droneTourTimer) { clearTimeout(droneTourTimer); droneTourTimer = null; }
@@ -6371,15 +7730,14 @@
           targetVals.greaseEmissiveI = 0; targetVals.glowOpacity = 0;
           telMode.textContent = 'Luz Visível'; telLight.textContent = 'Diurna';
           shutterEl.textContent = '—';
-        } else if (s === 'uv') {
+        } else if (s === 'uv' || s === 'weber') {
+          // 'uv' e 'weber' compartilham a mesma iluminação/obturador — só o
+          // texto do modo telemetrado muda (o pipeline de detecção roda por
+          // cima da mesma captura UV-A, não é uma cena separada).
           targetVals.ambientI = 0.025; targetVals.hemiI = 0.02; targetVals.sunI = 0.03;
           targetVals.uvSpotI = 5.5; targetVals.uvLensEmissive = 1.6;
-          telMode.textContent = 'Disparo UV-A 365nm'; telLight.textContent = 'UV-A (violeta)';
-          shutterEl.textContent = '< 1/2000s (estroboscópico)';
-        } else if (s === 'weber') {
-          targetVals.ambientI = 0.025; targetVals.hemiI = 0.02; targetVals.sunI = 0.03;
-          targetVals.uvSpotI = 5.5; targetVals.uvLensEmissive = 1.6;
-          telMode.textContent = 'Edge Computing (Weber)'; telLight.textContent = 'UV-A (violeta)';
+          telMode.textContent = s === 'uv' ? 'Disparo UV-A 365nm' : 'Edge Computing (Weber)';
+          telLight.textContent = 'UV-A (violeta)';
           shutterEl.textContent = '< 1/2000s (estroboscópico)';
         }
         setWeather(weather);
@@ -6434,8 +7792,10 @@
       function guidedTick() {
         if (!guidedMode) return;
         var step = GUIDED_SEQUENCE[guidedIndex];
-        setState(step.state);
-        guidedIndex = (guidedIndex + 1) % GUIDED_SEQUENCE.length;
+        if (!droneTourActive) { // não pisa no `state` script do Tour Drone enquanto ele roda
+          setState(step.state);
+          guidedIndex = (guidedIndex + 1) % GUIDED_SEQUENCE.length;
+        }
         guidedTimer = setTimeout(guidedTick, step.dur);
       }
       function setGuidedMode(on) {
@@ -6611,6 +7971,13 @@
         gameMode = on;
         document.body.classList.toggle('game-mode', on);
         setSoundEnabled(on);
+        if (on) {
+          initGpsMap();
+          // #gameHud estava com display:none; o Leaflet só mede o container
+          // (e busca os tiles certos) depois que o navegador aplica esse
+          // display:block — daí o invalidateSize adiado pro próximo tick.
+          setTimeout(function () { if (gpsMap) gpsMap.invalidateSize(); }, 0);
+        }
       }
       document.getElementById('gameModeBtn').addEventListener('click', function () { setGameMode(!gameMode); });
       window.addEventListener('keydown', function (e) {
@@ -6646,7 +8013,7 @@
       window.addEventListener('keydown', function (e) {
         var k = e.key.toLowerCase();
         if (k === 'e') { setDriverMode(!driverMode); return; }
-        if (!driverMode) return;
+        if (!driverMode || walkMode) return; // no modo Andar, W/S move a câmera, não o acelerador
         if (k === 'w') { throttleNotch = Math.min(THROTTLE_NOTCHES, throttleNotch + 1); updateDriveHint(); }
         if (k === 's') { throttleNotch = Math.max(0, throttleNotch - 1); updateDriveHint(); }
       });
@@ -6711,65 +8078,10 @@
         ctx.fillText(Math.round(rpm) + ' RPM', C, C + 104);
       }
 
-      /* --- Minimapa: a via corre no eixo X e serpenteia em Z, então o mapa é
-         uma vista de cima com o traçado real amostrado da mesma função da cena.
-         Desenha marco do pórtico (KM 341) e o rio como referência de posição. --- */
-      var miniCv = document.getElementById('ghMiniCanvas');
-      var miniCtx = miniCv.getContext('2d');
-      function drawMinimap(trainWorldX) {
-        var W = miniCv.width, ctx = miniCtx;
-        ctx.clearRect(0, 0, W, W);
-        ctx.fillStyle = 'rgba(24,30,24,0.9)';
-        ctx.fillRect(0, 0, W, W);
-
-        // pasto de fundo
-        ctx.fillStyle = 'rgba(58,88,42,0.55)';
-        ctx.fillRect(0, 0, W, W);
-
-        var cx = W / 2;
-        // A via ocupa LOOP unidades no mundo; mapeia pra altura do minimapa.
-        function xToPy(x) { return W / 2 - (x / (LOOP / 2)) * (W * 0.42); }
-        function zToPx(z) { return cx + (z / (LOOP / 2)) * (W * 0.42); }
-
-        // Leito da via — desenhado amostrando a MESMA função de traçado da cena 3D,
-        // então o desenho do mapa não pode divergir de onde o trilho realmente está.
-        function strokeTrack(color, width) {
-          ctx.strokeStyle = color; ctx.lineWidth = width;
-          ctx.beginPath();
-          for (var sx = -LOOP / 2; sx <= LOOP / 2; sx += 2) {
-            var px = zToPx(trackZ(sx)), py = xToPy(sx);
-            if (sx === -LOOP / 2) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-          }
-          ctx.stroke();
-        }
-        strokeTrack('rgba(196,120,72,0.95)', 16);
-        strokeTrack('rgba(40,40,44,0.9)', 4);
-
-        // rio, cruzando a via
-        var riverPy = xToPy(RIVER_X);
-        ctx.strokeStyle = 'rgba(70,150,160,0.9)';
-        ctx.lineWidth = 12;
-        ctx.beginPath(); ctx.moveTo(0, riverPy); ctx.lineTo(W, riverPy); ctx.stroke();
-
-        // pórtico no marco zero (trecho reto do traçado, por construção)
-        var gantryPy = xToPy(0), gantryPx = zToPx(trackZ(0));
-        ctx.fillStyle = '#c9d900';
-        ctx.fillRect(gantryPx - 30, gantryPy - 4, 60, 8);
-        ctx.font = '600 20px sans-serif'; ctx.fillStyle = '#e8ff5c';
-        ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-        ctx.fillText('KM 341', gantryPx + 38, gantryPy);
-
-        // trem — sobre a curva, não numa faixa central fixa
-        var tPy = xToPy(trainWorldX), tPx = zToPx(trackZ(trainWorldX));
-        ctx.fillStyle = '#fff';
-        ctx.beginPath(); ctx.arc(tPx, tPy, 11, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = '#4aa3ff';
-        ctx.beginPath(); ctx.arc(tPx, tPy, 7, 0, Math.PI * 2); ctx.fill();
-
-        // borda
-        ctx.strokeStyle = 'rgba(255,255,255,0.16)'; ctx.lineWidth = 6;
-        ctx.beginPath(); ctx.arc(W / 2, W / 2, W / 2 - 3, 0, Math.PI * 2); ctx.stroke();
-      }
+      /* --- Minimapa: migrado de canvas 2D sintético pra mapa real (Leaflet,
+         ver initGpsMap/updateGpsMarker acima) — a geografia real ao redor da
+         âncora GPS_BASE já mostra rio/relevo, não precisa mais desenhar à
+         mão. O marco do pórtico (KM 341) virou um circleMarker fixo. --- */
 
       var ghTimeEl = document.getElementById('ghTime');
       var ghDateEl = document.getElementById('ghDate');
@@ -6786,7 +8098,7 @@
         if (!gameMode) return;
         var kmh = TRAIN_NOMINAL_KMH * driveFactor;
         drawSpeedo(kmh, 620 + driveFactor * 640);
-        drawMinimap(trainGroup.position.x);
+        updateGpsMarker(trainGroup.position.x);
 
         var hh = Math.floor(mod(simClock, 86400) / 3600), mm = Math.floor((mod(simClock, 86400) % 3600) / 60);
         ghTimeEl.textContent = pad2(hh) + ':' + pad2(mm);
@@ -6910,6 +8222,23 @@
         return false;
       }
 
+      // Allowlist do raycast de oclusão de pickInspectionCamera(): só objetos
+      // FISICAMENTE SÓLIDOS contam como "bloqueando" a foto de evidência.
+      // Substitui a abordagem anterior de ir excluindo objeto por objeto
+      // (ax.group, carcaça da câmera, trilho) — aquilo resolvia um bloqueio
+      // de cada vez e sempre aparecia outro, porque o critério de partida
+      // (qualquer hit do raycaster conta) inclui coisas que nunca deveriam:
+      // Sprites/Points/Lines não são geometria sólida (são billboards,
+      // partículas, linhas de desenho — bbox helpers, corner brackets), e
+      // Meshes com blending aditivo são efeitos de brilho/neblina/calor
+      // (glow de LED, farol, calor do motor), não superfície opaca real.
+      function isSolidOccluder(obj) {
+        if (!obj.isMesh) return false;
+        var mat = obj.material;
+        if (mat && mat.transparent && mat.blending === THREE.AdditiveBlending) return false;
+        return true;
+      }
+
       // Verificação real de linha de visão (usada por pickInspectionCamera abaixo):
       // não é decorativa, o raycast de fato roda contra a cena (trem + ambiente)
       // antes de aceitar uma câmera como fonte da evidência — é a base concreta da
@@ -6932,15 +8261,26 @@
         var hits = inspectionRaycaster.intersectObjects([world, trainGroup], true);
         var blocked = false;
         for (var i = 0; i < hits.length; i++) {
+          if (!isSolidOccluder(hits[i].object)) continue;
           if (isDescendantOf(hits[i].object, ax.group)) continue;
+          // Ignora a própria carcaça decorativa da câmera testada (ver bug
+          // de auto-oclusão acima, junto de makeLowerCameraHousing).
+          if (primary.userData.housing && isDescendantOf(hits[i].object, primary.userData.housing)) continue;
+          // Ignora o trilho (ver marcação isRailTrack em makeRail): é uma
+          // barra fina e contínua, sem vão possível (o trem "descarrilharia"
+          // visualmente), que sem essa exclusão sempre bloqueava a câmera
+          // inferior — que cruza de um lado da via pro outro por baixo.
+          if (hits[i].object.userData.isRailTrack) continue;
           if (hits[i].distance < dist - 0.2) { blocked = true; break; }
         }
-        // A fonte selecionada no monitor Wayside é a mesma fonte do relatório.
-        // O operador precisa conseguir auditar exatamente a filmagem inferior ou
-        // superior; o overview só entra quando nenhuma fonte Wayside foi definida.
-        if (waysideSource === 'lower') return { cam: lower, label: (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)'), switched: false };
-        if (waysideSource === 'upper') return { cam: upper, label: (ax.side === 'ESQ' ? 'CAM-INSP-ESQ (pórtico)' : 'CAM-INSP-DIR (pórtico)'), switched: false };
-        if (!blocked) return { cam: primary, label: (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)'), switched: false };
+        // A fonte selecionada no monitor Wayside é só a PREFERÊNCIA do operador —
+        // se a checagem de oclusão acima achar essa câmera bloqueada, o fallback
+        // abaixo tenta a fonte alternativa e depois o overview. (Antes havia um
+        // retorno incondicional aqui pra 'lower'/'upper' que tornava esse fallback
+        // morto: a preferência sempre vencia, mesmo com a via bloqueada.)
+        if (!blocked) return { cam: primary, label: waysideSource === 'lower'
+          ? (ax.side === 'ESQ' ? 'CAM-LOW-ESQ (base do pórtico)' : 'CAM-LOW-DIR (base do pórtico)')
+          : (ax.side === 'ESQ' ? 'CAM-INSP-ESQ (pórtico)' : 'CAM-INSP-DIR (pórtico)'), switched: false };
         // A fonte alternativa tenta a mesma captura antes da visão geral.
         primary = waysideSource === 'lower' ? upper : lower;
         primary.lookAt(bearingPos);
@@ -6954,7 +8294,10 @@
         hits = inspectionRaycaster.intersectObjects([world, trainGroup], true);
         blocked = false;
         for (var j = 0; j < hits.length; j++) {
+          if (!isSolidOccluder(hits[j].object)) continue;
           if (isDescendantOf(hits[j].object, ax.group)) continue;
+          if (primary.userData.housing && isDescendantOf(hits[j].object, primary.userData.housing)) continue;
+          if (hits[j].object.userData.isRailTrack) continue;
           if (hits[j].distance < dist - 0.2) { blocked = true; break; }
         }
         if (!blocked) return { cam: primary, label: primary === lower
@@ -7091,14 +8434,121 @@
         return { nivel: 'MÉDIA', acao: 'Inspeção visual manual recomendada na próxima parada. Reavaliar com nova passagem antes de programar substituição.', condicao: 'ATENÇÃO', risco: 'MÉDIO' };
       }
 
-      // GPS simulado: ponto de referência plausível ao longo do corredor EFC
-      // Carajás, com deriva proporcional à posição do trem na malha — não é
-      // telemetria de satélite real, é uma coordenada ilustrativa consistente
-      // quadro a quadro (mesmo eixo, mesma posição, sempre a mesma leitura).
-      var GPS_BASE_LAT = -5.8213, GPS_BASE_LON = -47.4210;
+      /* ÂNCORA GEOGRÁFICA DA CENA — coordenada REAL sobre a Estrada de Ferro
+         Carajás, a oeste do pátio/estação ferroviária de Parauapebas (PA).
+
+         -5.9966, -49.8987
+
+         Por que este ponto (fonte: OpenStreetMap — a MESMA base que serve os
+         tiles do minimapa — consultada via Nominatim e Overpass API):
+           · "Estação Ferroviária de Parauapebas" é o nó OSM em
+             -5.99415, -49.89491 (railway=station);
+           · num raio de 1,5 km existem 8 vias com name="Estrada de Ferro
+             Carajás" e gauge=1600 (a bitola larga real da EFC): linha corrida
+             (usage=main), pátio (service=yard) e ramal industrial — ou seja,
+             corredor ferroviário + pátio industrial no mesmo lugar, que é
+             exatamente a combinação que esta cena 3D representa (via corrida
+             com pórtico wayside ao lado de instalação industrial);
+           · a coordenada acima é o meio da via OSM 249163988 (usage=main),
+             portanto cai EM CIMA do trilho, não ao lado dele.
+
+         Ajuste futuro: a cena inteira se reposiciona no mapa mexendo só em 3
+         constantes — GPS_BASE_LAT, GPS_BASE_LON e GPS_TRACK_BEARING_DEG
+         (logo abaixo). Nenhuma outra parte do código depende de geografia.
+
+         Procedência: a validação foi feita via OSM porque o MCP google-maps
+         (maps_geocode / maps_search_places) respondeu "The provided API key
+         is invalid" e não pôde ser usado. */
+      var GPS_BASE_LAT = -5.9966, GPS_BASE_LON = -49.8987;
       function simulatedGps(worldX) {
         return { lat: +(GPS_BASE_LAT + worldX * 0.00006).toFixed(5), lon: +(GPS_BASE_LON - worldX * 0.00004).toFixed(5) };
       }
+
+      /* --- Minimapa GPS real (Leaflet) ------------------------------------
+         Mesma âncora GPS_BASE_LAT/LON acima (KM 341). Conversão por
+         aproximação plana (equirretangular): válida aqui porque o traçado
+         inteiro (LOOP=420 unidades, ±2.1km com a escala abaixo) cobre só uns
+         poucos km ao redor da âncora — e perto do Equador 1° de latitude e
+         1° de longitude valem quase o mesmo em metros (erro <1% em ±6° de
+         lat), então não precisa de projeção real, só regra de três.
+         Usa X (avanço ao longo do corredor) E trackZ(x) (deslocamento
+         lateral) — a MESMA função que desenha os trilhos na cena 3D — e gira
+         esse par pelo rumo real da via (GPS_TRACK_BEARING_DEG), de modo que o
+         traçado desenhado corra POR CIMA do trilho real visível nos tiles, em
+         vez de cruzá-lo em ângulo. Assim o ponto no mapa segue a curva de
+         verdade, não uma reta, e "retorna ao início" sozinho: como X vem
+         direto de trainGroup.position.x (que já salta de +LOOP/2 pra -LOOP/2
+         a cada volta, sem transição — ver animate()), o ponto convertido
+         salta junto, sem nenhuma lógica extra de reset. */
+      var GPS_METERS_PER_UNIT = 10; // 1 unidade Three.js = 10 metros
+      var GPS_METERS_PER_DEGREE_LAT = 111320; // metros por grau de latitude, ~constante
+      var GPS_METERS_PER_DEGREE_LON = GPS_METERS_PER_DEGREE_LAT * Math.cos(GPS_BASE_LAT * Math.PI / 180); // perto do Equador, quase igual à latitude
+      /* Rumo real da EFC no ponto-âncora: 70° a partir do norte (ENE). Medido
+         por regressão (eixo principal) sobre os 12 vértices OSM da linha
+         principal num raio de 700 m da âncora. É isto que alinha o corredor da
+         cena com o trilho real do mapa; mudar este valor gira a cena inteira
+         em torno da âncora. */
+      var GPS_TRACK_BEARING_DEG = 70;
+      var GPS_TRACK_BEARING_RAD = GPS_TRACK_BEARING_DEG * Math.PI / 180;
+      function trainWorldXToLatLon(worldX) {
+        var along = worldX * GPS_METERS_PER_UNIT;         // avanço ao longo do corredor
+        var perp = trackZ(worldX) * GPS_METERS_PER_UNIT;  // desvio lateral da curva
+        var cosB = Math.cos(GPS_TRACK_BEARING_RAD), sinB = Math.sin(GPS_TRACK_BEARING_RAD);
+        var north = along * cosB - perp * sinB;
+        var east = along * sinB + perp * cosB;
+        return {
+          lat: GPS_BASE_LAT + north / GPS_METERS_PER_DEGREE_LAT,
+          lon: GPS_BASE_LON + east / GPS_METERS_PER_DEGREE_LON
+        };
+      }
+
+      var gpsMap = null, gpsTrainMarker = null;
+      function initGpsMap() {
+        if (gpsMap || typeof L === 'undefined') return;
+        gpsMap = L.map('ghMiniCanvas', {
+          center: [GPS_BASE_LAT, GPS_BASE_LON], zoom: 15,
+          zoomControl: false, attributionControl: false, dragging: false,
+          scrollWheelZoom: false, doubleClickZoom: false, boxZoom: false,
+          keyboard: false, touchZoom: false, tap: false
+        });
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          maxZoom: 19, attribution: '&copy; OpenStreetMap'
+        }).addTo(gpsMap);
+
+        // Traçado da via projetado no mapa real — amostra a MESMA trackZ(x)
+        // usada na cena 3D (mesmo passo de amostragem que o antigo minimapa
+        // em canvas usava), então o desenho não pode divergir de onde o
+        // trilho realmente está. Duplo traço (lastro largo + trilho fino por
+        // cima) pra ler como ferrovia, não como estrada genérica.
+        var trackLatLngs = [];
+        for (var sx = -LOOP / 2; sx <= LOOP / 2; sx += 2) {
+          var tp = trainWorldXToLatLon(sx);
+          trackLatLngs.push([tp.lat, tp.lon]);
+        }
+        L.polyline(trackLatLngs, { color: '#c47848', weight: 9, opacity: 0.85, interactive: false }).addTo(gpsMap);
+        L.polyline(trackLatLngs, { color: '#28282c', weight: 3, opacity: 0.9, interactive: false }).addTo(gpsMap);
+
+        // Pórtico SPECTRA fixo em x=0 (trecho reto do traçado, por
+        // construção — trackZ(0)=0) — mesma referência estática que o
+        // minimapa em canvas desenhava antes.
+        var gantry = trainWorldXToLatLon(0);
+        L.circleMarker([gantry.lat, gantry.lon], {
+          radius: 6, color: '#c9d900', weight: 2, fillColor: '#c9d900', fillOpacity: 0.9
+        }).addTo(gpsMap).bindTooltip('Pórtico SPECTRA · KM 341', { direction: 'top', offset: [0, -6] });
+
+        gpsTrainMarker = L.marker([GPS_BASE_LAT, GPS_BASE_LON], {
+          icon: L.divIcon({ className: 'gps-train-marker', html: '<span></span>', iconSize: [16, 16], iconAnchor: [8, 8] }),
+          interactive: false
+        }).addTo(gpsMap);
+      }
+      function updateGpsMarker(worldX) {
+        if (!gpsMap) return;
+        var p = trainWorldXToLatLon(worldX);
+        var latLng = [p.lat, p.lon];
+        gpsTrainMarker.setLatLng(latLng);
+        gpsMap.panTo(latLng, { animate: false });
+      }
+      window.addEventListener('resize', function () { if (gpsMap && gameMode) gpsMap.invalidateSize(); });
 
       var alertFlashTimer = 0;      // flash de luz do pórtico
       var edgeLedAlertTimer = 0;    // LED do gabinete de edge computing vira vermelho
@@ -7689,6 +9139,8 @@
 
         updateInspMarker();
 
+        updateVegetationLOD(dt);
+        updateSecurity(dt);
         updateWeather(dt);
 
         updateDrive(dt);
@@ -7749,7 +9201,7 @@
               ax.bboxMat.color.setHex(CANDIDATE_COLOR_HEX);
               ax.cornerMat.color.setHex(CANDIDATE_COLOR_HEX);
             } else if (ax.cascadePhase === 'candidate') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_CANDIDATE_TIME) {
                 ax.cascadePhase = 'segmenting';
                 ax.cascadeTimer = 0;
@@ -7757,14 +9209,14 @@
                   : (ax.health === 'LEAK' ? (0.86 + Math.random() * 0.11) : (0.55 + Math.random() * 0.20));
               }
             } else if (ax.cascadePhase === 'segmenting') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_SEG_TIME) {
                 ax.cascadePhase = 'analyzing';
                 ax.cascadeTimer = 0;
                 ax.temporalScore = ax.contaminated ? (0.35 + Math.random() * 0.20) : Math.min(1, 0.75 + prox * 0.30);
               }
             } else if (ax.cascadePhase === 'analyzing') {
-              ax.cascadeTimer += dt;
+              ax.cascadeTimer += dt * speedMultiplier;
               if (ax.cascadeTimer >= STAGE_ANALYZE_TIME) {
                 ax.cnnScore = ax.contaminated ? (0.20 + Math.random() * 0.25)
                   : (ax.health === 'LEAK' ? (0.85 + Math.random() * 0.12) : (0.04 + Math.random() * 0.14));
@@ -7913,6 +9365,22 @@
         return { msPorQuadro: +ms.toFixed(2), fpsEquivalente: Math.round(1000 / ms) };
       };
 
+      /* Métricas de cena — usado pra medir o impacto da vegetação (draw calls,
+         triângulos, custo de quadro) antes e depois de mexer na densidade. Os
+         números de renderer.info.render só são preenchidos APÓS um render, por
+         isso força um renderPost() antes de ler. */
+      window.__sceneStats = function () {
+        renderPost();
+        var r = renderer.info.render, m = renderer.info.memory;
+        return {
+          drawCalls: r.calls,
+          triangulos: r.triangles,
+          geometriasNaGPU: m.geometries,
+          texturasNaGPU: m.textures,
+          custo: window.__renderCost(30)
+        };
+      };
+
       /* Posiciona a câmera para inspecionar a travessia. Existe porque conduzir a
          órbita "no braço" até um ponto específico é impreciso e escorrega para
          baixo do terreno; aqui a vista é reproduzível. dist/alt/lateral em unidades
@@ -7949,6 +9417,7 @@
         leakAx.cascadePhase = 'confirmed';
         leakAx.bboxMat.color.setHex(leakAx.finalColorHex);
         leakAx.cornerMat.color.setHex(leakAx.finalColorHex);
+        emitAlertPayload(leakAx);
         handleConfirmedLeak(leakAx);
         return { ok: true, eventId: leakAx.lastEventId, totalEvents: INSPECTION_EVENTS.length };
       };
