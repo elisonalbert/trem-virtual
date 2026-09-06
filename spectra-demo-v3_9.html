@@ -697,47 +697,22 @@
       gap: 5px;
     }
 
-    .fault-chip,
-    .exploded-btn {
-      border: 1px solid var(--border);
-      background: var(--panel-2);
-      color: var(--text);
-      border-radius: 5px;
-      padding: 7px 8px;
-      font: 11px var(--font-mono);
-      text-align: left;
-      cursor: grab;
-    }
-
-    .fault-chip:hover,
-    .exploded-btn:hover {
-      border-color: var(--cyan);
-      color: var(--cyan);
-    }
-
-    #faultDropzone {
-      margin-top: 8px;
-      border: 1px dashed var(--cyan);
-      border-radius: 5px;
-      padding: 10px 8px;
-      color: var(--cyan);
-      font: 10px var(--font-mono);
-      text-align: center;
-      transition: background .15s ease, border-color .15s ease;
-    }
-
-    #faultDropzone.over {
-      background: rgba(0, 234, 255, 0.13);
-      border-color: var(--accent);
-    }
-
     .exploded-btn {
       width: 100%;
       margin-top: 10px;
+      border: 1px solid rgba(201, 217, 0, .35);
+      background: var(--panel-2);
+      color: var(--accent);
+      border-radius: 5px;
+      padding: 7px 8px;
+      font: 11px var(--font-mono);
       text-align: center;
       cursor: pointer;
-      color: var(--accent);
-      border-color: rgba(201, 217, 0, .35);
+    }
+
+    .exploded-btn:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
     }
 
     .gallery-toolbar {
@@ -1057,6 +1032,11 @@
       color: var(--muted);
       margin-top: 8px;
       line-height: 1.45;
+    }
+
+    .statebtn:disabled {
+      opacity: .38;
+      cursor: not-allowed;
     }
 
     .statebtn {
@@ -2076,17 +2056,6 @@
           </div>
 
           <div class="panel">
-            <h3>Modo Sabotador</h3>
-            <div class="saboteur-palette">
-              <button class="fault-chip" draggable="true" data-fault="dust">◼ Poeira extrema</button>
-              <button class="fault-chip" draggable="true" data-fault="grease">● Graxa</button>
-              <button class="fault-chip" draggable="true" data-fault="reflection">◇ Reflexo metálico</button>
-            </div>
-            <div id="faultDropzone">Arraste uma falha para o trilho</div>
-            <div class="speedhint">O Edge classifica o marcador como vazamento ou falso positivo.</div>
-          </div>
-
-          <div class="panel">
             <h3>Estados de Detecção</h3>
             <button class="statebtn active" data-state="visible">💡 Luz Visível <span class="kbd">1</span></button>
             <button class="statebtn" data-state="uv">🟣 UV-A + Filtro Óptico <span class="kbd">2</span></button>
@@ -2112,6 +2081,22 @@
             <button class="statebtn" id="walkModeBtn" data-toggle="walk">🚶 Modo Pedestre (WASD)</button>
             <div class="speedhint" style="margin-top:2px;">W/A/S/D anda, arraste olha ao redor, espaço pula. Clique de
               novo no botão pra voltar à câmera orbital.</div>
+          </div>
+
+          <div class="panel">
+            <h3>Cenário de Risco</h3>
+            <button class="statebtn" id="riskBtn">⚠️ Simular Falha Não Tratada</button>
+            <div class="speedhint" style="margin-top:2px;">Mostra o que acontece quando o alerta de vazamento é
+              <b>ignorado</b>: superaquecimento → faísca → eixo travado → tombamento na ponte → minério no rio.
+              Não interfere no fluxo normal de detecção.</div>
+            <div class="telrow" style="margin-top:8px;"><span class="k">Sem intervenção</span><span class="v"
+                id="riskTimer">—</span></div>
+            <div class="telrow"><span class="k">Progressão</span><span class="v" id="riskStage">Estágio 0/5</span></div>
+            <div class="speedhint" id="riskStageLabel" style="margin-top:2px;">Modo desligado</div>
+            <div class="speedhint" style="margin-top:6px;">Deixe em <b>Luz Visível</b> e o contador corre até a falha.
+              Mude para <b style="color:var(--cyan)">Edge (Weber + CNN)</b> e a cascata confirma o vazamento na
+              passagem seguinte, zerando o contador — é a diferença entre ordem de serviço e passivo ambiental.</div>
+            <button class="statebtn" id="riskResetBtn" style="margin-top:8px;" disabled>↺ Resetar Cenário</button>
           </div>
         </div>
 
@@ -2864,9 +2849,24 @@
       /* ============================================================
          0.5 CONSTANTES GLOBAIS DE CENA
       =============================================================*/
-      /* TRACK_HALF 300 (era 95): a via precisa terminar ALÉM da distância em que a
-         neblina satura (210), senão a ponta aparece cortada no meio da paisagem.
-      
+      /* TRACK_HALF 520 (era 300, antes 95): a via precisa terminar ALÉM da
+         distância em que a neblina satura, senão a ponta aparece cortada no meio
+         da paisagem. Com 300 essa invariante tinha se perdido: o alcance da
+         neblina em tempo limpo subiu para far=900 (ver o bloco de clima em
+         animate), e a ponta do leito voltou a aparecer no horizonte — dá pra vê-la
+         de qualquer câmera que olhe ao longo da via.
+
+         520 é o compromisso: da posição mais extrema do trem (±LOOP/2 = ±210) a
+         ponta fica 310 unidades à frente, contra 90 antes. Sumir de vez exigiria
+         ~1040 (210 + a saturação da neblina a 830), o que multiplicaria por ~3,5
+         as contagens derivadas daqui — dormentes, brita, postes e vegetação todas
+         escalam com TRACK_HALF. Se a ponta ainda incomodar, o ajuste barato não é
+         alongar mais: é puxar scene.fog.far do tempo limpo para baixo.
+
+         GROUND_HALF e CANAL_LEN acompanham: o chão precisa passar da via (senão o
+         leito flutua sobre o vazio) e o canal do rio precisa cobrir o chão em Z
+         (senão o rio "acaba" no meio do campo).
+
          LOOP 420 (era 130): é onde o trem "dá a volta" — a posição salta de +210
          para -210. Com 130 esse salto acontecia a 65 unidades do pórtico, bem
          dentro do campo visível, e lia como o trem sumindo e reaparecendo do nada.
@@ -2874,7 +2874,7 @@
       
          LOOP também é o PERÍODO da curva do traçado (ver trackZ), o que mantém a
          emenda contínua — geometria e rumo coincidem no ponto de retorno. */
-      var TRACK_HALF = 300;
+      var TRACK_HALF = 520;
       var LOOP = 420;
       /* 3.0 (era 1.35) para compensar o LOOP, que triplicou.
       
@@ -2888,6 +2888,45 @@
       var TRAIN_SPEED_BASE = 3.0;
       var WHEEL_RADIUS = 0.46;
       var DETECT_HALF = 1.55;
+      /* Estação da travessia do rio. Valor de ENQUADRAMENTO, não geográfico —
+         escolha deliberada, documentada abaixo.
+
+         16 põe a ponte 160 m depois do pórtico, de modo que os dois cabem no
+         mesmo quadro e o pórtico fica ANTES do rio no sentido da marcha. É a
+         leitura que a demonstração precisa.
+
+         A alternativa geográfica foi levantada e descartada. A travessia REAL
+         mais próxima da âncora é a do RIO PARAUAPEBAS (OSM way 211136814,
+         waterway=river), a 1365 m dela:
+
+           travessia no corredor da cena  -5.997597, -49.910744  (worldX = -129.1)
+           travessia na EFC real          -5.998561, -49.910873  (OSM way 249163987,
+                                          Estrada de Ferro Carajás, usage=main)
+
+         Vale o PRIMEIRO se um dia se quiser a amarração geográfica, porque o
+         marcador do minimapa anda sobre o corredor da cena
+         (trainWorldXToLatLon), não sobre a polilinha da EFC real. Os dois pontos
+         distam ~108 m: trackZ() é uma senoide sintética presa a um único rumo,
+         cola na EFC perto da âncora e se afasta ~100 m a 1,3 km dali.
+
+         Trocar por -129.1 põe a ponte sobre o rio de verdade nos tiles do OSM
+         (testado: o marcador do trem passa a 1-2 px do ponto da travessia), ao
+         custo de afastar a ponte 1,29 km do pórtico — que foi justamente o que
+         se decidiu não pagar. Nenhuma outra constante precisa mudar junto:
+         leito, lâmina, margens, depressão do terreno, vegetação, postes, cercas
+         e a caminhabilidade do pedestre derivam todos de RIVER_X/inRiverZone. A
+         única restrição é |RIVER_X| + RIVER_HALF_WIDTH < GROUND_HALF (350),
+         senão uma das metades do chão nasce com largura negativa.
+
+         Consequência assumida: a ponte da cena NÃO corresponde a um rio real
+         nos tiles. O marcador do minimapa (ver initGpsMap) rotula por isso a
+         "ponte da cena", não um curso d'água nomeado.
+
+         Procedência do levantamento: OpenStreetMap via Overpass (waterway +
+         railway num raio de ~4 km da âncora). O MCP google-maps não pôde ser
+         usado — maps_geocode, maps_search_places e maps_reverse_geocode
+         responderam "The provided API key is invalid". O Places API também não
+         serviria: devolve pontos de interesse, e isto exige geometria de linha. */
       var RIVER_X = 16;
       var RIVER_HALF_WIDTH = 3.5;
       function inRiverZone(x, margin) {
@@ -3014,6 +3053,64 @@
       var HILL_RAMP = 30;     // distância pra atingir altura plena
       var GROUND_Y = -0.28;   // cota da planície (mesma dos planos de chão)
 
+      /* ============================================================
+         COLISORES DO MODO PEDESTRE
+      ==============================================================
+         NÃO usa raycasting nem Box3, e a razão é que a cena já resolvia isso de
+         outro jeito: isWalkable(x,z) faz colisão ANALÍTICA (rio, pernas do
+         pórtico, envelope do trem) e updateWalk() já tenta o movimento em X e Z
+         separadamente — ou seja, o "deslizar em vez de travar" já existia. O que
+         faltava era só registrar os obstáculos.
+
+         Cada obstáculo vira um CÍRCULO (x, z, raio). Círculo em vez de caixa
+         porque quase tudo aqui é vertical e de seção aproximadamente circular
+         (tronco, poste, mourão), o teste é uma subtração e uma comparação de
+         quadrados, e não há orientação pra acompanhar quando a via curva.
+
+         Para InstancedMesh (árvores, mourões, postes) não dá pra raycastar a
+         malha instanciada de forma barata — então o colisor é registrado no
+         momento em que a instância é posicionada, que é quando as coordenadas já
+         estão calculadas de graça.
+
+         GRID ESPACIAL: com milhares de árvores, varrer a lista inteira por quadro
+         seria inviável. Os colisores são indexados por célula de WALK_CELL, e o
+         teste olha só a célula do ponto e as 8 vizinhas — custo constante,
+         independente do total de obstáculos na cena.
+      ------------------------------------------------------------- */
+      var WALK_CELL = 8;                 // lado da célula do grid espacial
+      var walkColliderGrid = {};         // "cx|cz" -> [{x, z, r}]
+      var walkColliderCount = 0;
+
+      function addWalkCollider(x, z, r) {
+        var key = Math.floor(x / WALK_CELL) + '|' + Math.floor(z / WALK_CELL);
+        if (!walkColliderGrid[key]) walkColliderGrid[key] = [];
+        walkColliderGrid[key].push({ x: x, z: z, r: r });
+        walkColliderCount++;
+      }
+
+      /* Um obstáculo pode cair perto da divisa de célula, por isso o teste varre
+         as 9 células ao redor — nunca a lista toda. */
+      function hitsWalkCollider(x, z, corpo) {
+        var cx = Math.floor(x / WALK_CELL), cz = Math.floor(z / WALK_CELL);
+        for (var i = -1; i <= 1; i++) {
+          for (var j = -1; j <= 1; j++) {
+            var lista = walkColliderGrid[(cx + i) + '|' + (cz + j)];
+            if (!lista) continue;
+            for (var k = 0; k < lista.length; k++) {
+              var c = lista[k];
+              var dx = x - c.x, dz = z - c.z;
+              var alcance = c.r + corpo;
+              if (dx * dx + dz * dz < alcance * alcance) return true;
+            }
+          }
+        }
+        return false;
+      }
+
+      window.__walkColliderStats = function () {
+        return { total: walkColliderCount, celulas: Object.keys(walkColliderGrid).length, tamanhoCelula: WALK_CELL };
+      };
+
       function terrainHeight(x, z) {
         // Distância até a LINHA DE CENTRO, não até o eixo Z=0: com a via em
         // curva, medir |z| deixaria a plataforma nivelada reta enquanto o
@@ -3110,6 +3207,48 @@
         var h = hex.replace('#', '');
         var r = parseInt(h.substring(0, 2), 16), g = parseInt(h.substring(2, 4), 16), b = parseInt(h.substring(4, 6), 16);
         return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+      }
+
+      /* ============================================================
+         LUZ SUAVE — fonte única para farol e postes
+      ==============================================================
+         Receita tirada do farol da locomotiva, que era o efeito que já lia bem:
+
+           PointLight(cor, intensidade, distance, decay=2) + sprite pequeno
+
+         O que faz a diferença, e por quê:
+         · decay = 2 é atenuação física (inverso do quadrado). É ela que dá a
+           transição contínua do centro pra borda, sem nenhuma borda dura.
+         · PointLight, não SpotLight: sem cone, não existe aresta de recorte —
+           e o alcance sai circular e localizado, que é o formato certo tanto pro
+           farol quanto pra iluminação pública.
+         · distance curto segura o alcance sem precisar de intensidade alta, que
+           é o que estoura a cor do material iluminado.
+         · o sprite é PEQUENO e só representa o brilho da própria lâmpada. Sprite
+           grande vira bola de luz solta no ar.
+
+         NÃO existe plano de poça no chão nesta receita — e é de propósito: o
+         disco de textura no piso era justamente o que dava o aspecto estático
+         nos postes. Quem ilumina o chão é a luz de verdade.
+      ------------------------------------------------------------- */
+      function addSoftLight(parent, x, y, z, opts) {
+        opts = opts || {};
+        var cor = opts.color !== undefined ? opts.color : 0xfff2c0;
+        var luz = new THREE.PointLight(cor, 0, opts.distance || 8, 2);
+        luz.position.set(x, y, z);
+        parent.add(luz);
+
+        var brilho = new THREE.Sprite(new THREE.SpriteMaterial({
+          map: makeGlowSpriteTexture(opts.glowHex || '#fff2c0'), color: cor,
+          transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
+        }));
+        var e = opts.glowScale || 0.55;
+        brilho.scale.set(e, e, e);
+        brilho.position.set(x + (opts.glowOffsetX || 0), y, z);
+        parent.add(brilho);
+
+        // intensidade nominal guardada aqui: quem acende/apaga só escala isto
+        return { luz: luz, brilho: brilho.material, intensidadeNominal: opts.intensity || 1.1, brilhoNominal: opts.glowOpacity || 0.85 };
       }
 
       function makeGlowSpriteTexture(colorHex) {
@@ -3773,15 +3912,28 @@
          estender o chão, o trilho passaria a existir sobre o vazio. 350 dá folga
          sobre a distância máxima que a neblina deixa enxergar (210) somada ao
          deslocamento da câmera que segue o trem. */
-      var GROUND_HALF = 350;
-      var groundSegX = 90, groundSegZ = 150;
-      var groundLeft = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_HALF + (RIVER_X - RIVER_HALF_WIDTH), GROUND_HALF * 2, groundSegX, groundSegZ), groundMat);
+      var GROUND_HALF = 560;   // > TRACK_HALF: o chao tem que passar da ponta da via
+      /* Densidade de vértices do chão em UNIDADES POR VÉRTICE, não em contagem
+         fixa. Com contagem fixa (era segX=90, segZ=150), esticar GROUND_HALF de
+         350 para 560 afinou a malha de 4,0/4,7 para 6,4/7,5 unidades por vértice
+         — e como o relevo tem componente de comprimento de onda 42
+         (sin((x+z)*0.15) em terrainHeight), o erro entre a malha desenhada e a
+         altura analítica saltou de 0,53 para 1,54 no pior caso. Objetos são
+         posicionados pela altura ANALÍTICA, então esse erro aparece como poste,
+         árvore ou cerca flutuando ou afundando até 1,5 unidade nas encostas.
+         Derivar da largura mantém o relevo fiel a qualquer extensão de cena. */
+      var GROUND_VERTEX_STEP = 4.2;
+      var groundW_L = GROUND_HALF + (RIVER_X - RIVER_HALF_WIDTH);
+      var groundW_R = GROUND_HALF - (RIVER_X + RIVER_HALF_WIDTH);
+      var groundSegs = function (largura) { return Math.max(8, Math.round(largura / GROUND_VERTEX_STEP)); };
+      var groundSegZ = groundSegs(GROUND_HALF * 2);
+      var groundLeft = new THREE.Mesh(new THREE.PlaneGeometry(groundW_L, GROUND_HALF * 2, groundSegs(groundW_L), groundSegZ), groundMat);
       groundLeft.rotation.x = -Math.PI / 2;
       groundLeft.position.set(-GROUND_HALF + (GROUND_HALF + (RIVER_X - RIVER_HALF_WIDTH)) / 2, GROUND_Y, 0);
       groundLeft.receiveShadow = true;
       displaceGroundPlane(groundLeft, true);
       world.add(groundLeft);
-      var groundRight = new THREE.Mesh(new THREE.PlaneGeometry(GROUND_HALF - (RIVER_X + RIVER_HALF_WIDTH), GROUND_HALF * 2, groundSegX, groundSegZ), groundMat);
+      var groundRight = new THREE.Mesh(new THREE.PlaneGeometry(groundW_R, GROUND_HALF * 2, groundSegs(groundW_R), groundSegZ), groundMat);
       groundRight.rotation.x = -Math.PI / 2;
       groundRight.position.set(GROUND_HALF - (GROUND_HALF - (RIVER_X + RIVER_HALF_WIDTH)) / 2, GROUND_Y, 0);
       groundRight.receiveShadow = true;
@@ -3794,7 +3946,7 @@
       // altura e não se lia como vão de ponte de nenhum ângulo útil.
       // 720 de extensão: o canal tem que alcançar as bordas do terreno estendido,
       // senão ele "acaba" no meio do campo e vira outro corte visível.
-      var CANAL_LEN = 720;
+      var CANAL_LEN = 1160;
       var riverBed = new THREE.Mesh(new THREE.PlaneGeometry(RIVER_HALF_WIDTH * 2, CANAL_LEN), riverBedMat);
       riverBed.rotation.x = -Math.PI / 2;
       riverBed.position.set(RIVER_X, -3.0, 0);
@@ -4190,6 +4342,7 @@
         treeDummy.rotation.y = Math.random() * 6.28;
         treeDummy.updateMatrix();
         trunks.setMatrixAt(ti, treeDummy.matrix);
+        addWalkCollider(tx, tz, 0.22 * s);   // estipe fino da palmeira
 
         shadowDummy.position.set(tx, th - 0.235, tz);
         shadowDummy.rotation.set(-Math.PI / 2, 0, 0);
@@ -4564,6 +4717,9 @@
             vegDummy.scale.set(s, s * (0.85 + rng() * 0.4), s);   // altura varia mais que a largura
             vegDummy.updateMatrix();
             trunkIM.setMatrixAt(t, vegDummy.matrix);
+            // só o TRONCO colide: a copa fica acima da cabeça, e travar nela
+            // prenderia o pedestre longe da árvore sem motivo visível.
+            addWalkCollider(tr.x, tr.z, 0.34 * s);
             canopyIM.setMatrixAt(t, vegDummy.matrix);
 
             /* Cor por instância: mistura os dois verdes e puxa pro seco numa
@@ -4721,6 +4877,7 @@
         poleDummy.rotation.set(0, 0, 0);
         poleDummy.updateMatrix();
         poles.setMatrixAt(pi, poleDummy.matrix);
+        addWalkCollider(pp.x, pp.z, 0.3);
 
         poleDummy.position.set(pp.x, groundH + 0.13, pp.z);
         poleDummy.updateMatrix();
@@ -5220,11 +5377,78 @@
       var SEC_GANTRY_LATERAL = 5.6;                  // afastamento da linha de centro (cabe entre lastro e postes)
       var SEC_TRAFO_HALF_X = 7;                      // meia-extensão do perímetro da subestação
       var SEC_TRAFO_LAT_IN = -4.4, SEC_TRAFO_LAT_OUT = -10.6; // faixa lateral cercada da subestação
-      var SEC_GATE_X = -34;                          // portaria: posição ao longo da via
+      /* PROBLEMA 3 corrigido — a portaria estava em x=-34, ou seja, 23 unidades
+         ALÉM da ponta da cerca do pórtico (que vai até -11), sem nada ligando as
+         duas visualmente: lia como construção solta numa estrada secundária, não
+         como a entrada da instalação. Trazida pra logo depois da ponta da cerca,
+         de modo que pórtico e portaria se leiam como o mesmo complexo, e ganhou
+         um letreiro de identificação (ver buildGatehouse). */
+      var SEC_GATE_X = -17;                          // portaria: logo após a cerca do pórtico
+      var SEC_GATE_OPEN = true;                      // estado do acesso: true = liberado (cancela erguida, portão recuado)
+      var SEC_GATE_SWING_SPEED = 1.6;                // rad/s da transição de 90° da cancela
+      /* Portão de correr: as duas estações da folha, em Z local da portaria.
+         FECHADO = 0 centra a folha (3,2 de largura) no vão entre as colunas
+         (z = ±1,7), sobrando 0,1 de folga de cada lado. ABERTO = 3.35 recua a
+         folha inteira para além da coluna +1,7, liberando a passagem. O trilho
+         foi recentrado em z=+1,7 justamente para cobrir as duas estações. */
+      var SEC_LEAF_CLOSED_Z = 0;
+      var SEC_LEAF_OPEN_Z = 3.35;
+      /* 1.9 u/s: a folha cobre os 3,35 em ~1,8 s, contra ~1,0 s dos 90° da
+         cancela (1,5708 rad a 1,6 rad/s). A diferença é intencional — portão de
+         correr é mais pesado que cancela. Os dois PARTEM juntos, porque leem o
+         mesmo SEC_GATE_OPEN no mesmo quadro; só chegam em tempos diferentes. */
+      var SEC_GATE_SLIDE_SPEED = 1.9;
+      /* --- Acionamento automático pela aproximação do trem ------------------
+         O portão não tinha gatilho algum na interface: só window.__setGateOpen()
+         pelo console, o que na prática significava um portão que ninguém abria.
+
+         Agora ele reage à composição. A distância é medida da PONTA do trem
+         (não do centro) até a estação do portão, e é medida NO LAÇO: como
+         trainGroup.position.x salta de +LOOP/2 para -LOOP/2 a cada volta, uma
+         subtração simples daria um pulo de 420 na emenda e o portão bateria.
+         Envolver a diferença em [-LOOP/2, LOOP/2) resolve.
+
+         Os dois limiares são diferentes de propósito (histerese): sem isso, um
+         trem parado exatamente no limiar ficaria abrindo e fechando a cada
+         quadro. Abre a 60, fecha a 78 — 18 unidades de zona morta. */
+      var GATE_AUTO_OPEN_DISTANCE = 60;
+      var GATE_AUTO_CLOSE_DISTANCE = 78;
+      var gateAutoMode = true;                       // desligado por __setGateOpen manual, ver abaixo
       var SEC_GATE_LATERAL = 13.5;                   // sobre a estrada de acesso existente
+      /* --- Perímetro unificado pórtico + portaria --------------------------
+         Antes eram duas cercas soltas: a do pórtico em ±5,6 (estações -11..11) e
+         a da portaria em 13,5. Entre elas sobrava uma faixa de 7,9 de largura,
+         aberta dos dois lados — dava pra contornar a pé e chegar ao pórtico sem
+         passar pelo portão. Pior: as duas cercas da portaria corriam AO LONGO
+         de 13,5, que é a linha de centro da estrada (makeRoadRun(13.5) com 3,4
+         de largura). Cerca no meio da pista não fecha nada; o que fecha é uma
+         cerca ATRAVESSANDO a estrada, com vão só onde o portão está.
+
+         SEC_ROAD_HALF_W casa com a largura de makeRoadRun e, por construção, as
+         colunas do portão (local z = ±1,7) caem exatamente nas bordas da pista —
+         então os flancos encostam nas colunas sem folga nem sobreposição. */
+      var SEC_ROAD_HALF_W = 1.7;
+      var SEC_GATE_LAT_IN = SEC_GATE_LATERAL - SEC_ROAD_HALF_W;   // 11.8 — borda interna da pista
+      var SEC_GATE_LAT_OUT = SEC_GATE_LATERAL + SEC_ROAD_HALF_W;  // 15.2 — borda externa da pista
+      var SEC_PERIM_LAT_OUT = 17.2;                  // cerca externa, 2.0 além da pista
+      var SEC_RAIL_CLEAR = 3.5;                      // meia-largura do lastro: até onde a cerca chega sem invadir a via
       var SEC_FENCE_H = 2.4;                         // altura da cerca
       var SEC_POST_SPACING = 3.0;                    // vão entre mourões
       var SEC_LED_HZ = 0.55;                         // frequência do LED das CFTV
+
+      /* --- Iluminação noturna dos postes de segurança ---------------------
+         Usa a MESMA receita do farol da locomotiva (ver addSoftLight): PointLight
+         com decay 2 + sprite pequeno. Só cor e alcance mudam de contexto — o poste
+         é mais alto e alcança mais que o farol, mas a curva de queda da luz é a
+         mesma, e é dela que vem a suavidade. */
+      /* COR ÚNICA para os três elementos. O cone e a poça herdam daqui, então
+         não há como um sair branco e outro amarelo. O verde que aparecia no chão
+         não era a poça: era a GRAMA recebendo luz direta do SpotLight, mais forte
+         que o plano aditivo por cima. Por isso a intensidade do spot caiu junto —
+         quem tem que dar a cor do efeito é a poça, não o material do terreno. */
+      var SEC_LIGHT_COLOR = 0xfff4d6;   // branco-quente
+      var SEC_LIGHT_INTENSITY = 1.15;   // era 2.6: a luz direta dominava e esverdeava o chão
+      var SEC_LIGHT_DISTANCE = 16;      // alcance do SpotLight
 
       // --- Texturas procedurais --------------------------------------------
       /* Alambrado: a malha é desenhada como duas famílias de diagonais cruzadas
@@ -5288,7 +5512,7 @@
       world.add(secGroup);
       var secDummy = new THREE.Object3D();
       var secLedMats = [];        // LEDs de CFTV — piscam em updateSecurity()
-      var secNightLamps = [];     // halos dos postes de luz — acendem à noite
+      var secNightLamps = [];     // conjunto spot+brilho+feixe+poça de cada poste
 
       /* --- Cerca: trecho reto acompanhando a via ---------------------------
          Painéis + mourões, ambos em InstancedMesh: 2 (ou 3, com concertina) draw
@@ -5342,6 +5566,15 @@
           secDummy.scale.set(1, 1, 1);
           secDummy.updateMatrix();
           posts.setMatrixAt(p, secDummy.matrix);
+          addWalkCollider(pp.x, pp.z, 0.22);
+        }
+        /* A cerca é uma PAREDE, não fileira de postes: colidir só nos mourões
+           deixaria passar pelo vão entre eles. Estes colisores preenchem cada
+           vão com raio de meio passo, formando barreira contínua. */
+        for (var fx = 0; fx < vaos; fx++) {
+          var xv = x0 + passo * (fx + 0.5);
+          var pv = trackPos(xv, lateral);
+          addWalkCollider(pv.x, pv.z, Math.max(0.3, passo * 0.5));
         }
         g.add(panels, posts);
         if (comConcertina) { concertina.count = ci; g.add(concertina); }
@@ -5380,6 +5613,16 @@
           secDummy.scale.set(1, 1, 1);
           secDummy.updateMatrix();
           posts.setMatrixAt(p, secDummy.matrix);
+          // Sem isto a cerca transversal era ATRAVESSÁVEL a pé: buildFenceRun
+          // registrava colisor por mourão e por painel, buildFenceCross não
+          // registrava nenhum. Um perímetro que o pedestre atravessa não é
+          // perímetro — é decoração.
+          addWalkCollider(qx, qz, 0.22);
+        }
+        for (var pv2 = 0; pv2 < vaos; pv2++) {
+          var tv = (pv2 + 0.5) / vaos;
+          var vx = a.x + (b.x - a.x) * tv, vz = a.z + (b.z - a.z) * tv;
+          addWalkCollider(vx, vz, Math.max(0.3, (len / vaos) * 0.5));
         }
         g.add(panels, posts);
         return g;
@@ -5430,19 +5673,54 @@
         secLedMats.push(ledMat);
 
         g.add(mast, arm, body, hood, glass, led);
+        addWalkCollider(p.x, p.z, 0.18);   // mastro da CFTV
         g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
         g.rotation.y = -trackHeading(xAt) + (apontaPraDentro ? Math.PI : 0);
         secGroup.add(g);
       }
 
+      /* Gradiente radial suave, usado tanto no brilho da lâmpada quanto na poça
+         de luz no chão. O falloff tem três paradas (núcleo quase branco, meio
+         âmbar, borda totalmente transparente) — com duas paradas só, a borda
+         fica dura e o plano se denuncia como disco recortado, que era
+         exatamente o defeito relatado. */
+      function makeLightGradientTexture(corCentro, corMeio) {
+        var c = makeCanvas(128, 128), ctx = c.getContext('2d');
+        ctx.clearRect(0, 0, 128, 128);
+        var g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+        g.addColorStop(0.0, corCentro);
+        g.addColorStop(0.35, corMeio);
+        g.addColorStop(1.0, 'rgba(255,233,176,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, 128, 128);
+        return new THREE.CanvasTexture(c);
+      }
+      var lampGlowTex = makeLightGradientTexture('rgba(255,252,236,0.95)', 'rgba(255,226,150,0.45)');
+      /* A poça é o que dá a COR do efeito no chão. O núcleo vai quase branco e o
+         meio âmbar; como o blending é aditivo, isso lava o verde da grama por
+         baixo em vez de deixá-lo definir a cor — que era o defeito relatado. */
+
       /* --- Poste de iluminação de segurança -------------------------------
          Diferente dos postes de transmissão (madeira, cruzeta, isoladores):
-         mastro metálico claro com braço curvo e luminária retangular apontando
-         pro chão. O halo só aparece à noite — ver updateSecurity(). */
+         mastro metálico claro com braço curvo e luminária apontando pro chão.
+
+         A iluminação noturna tem TRÊS elementos que precisam concordar entre
+         si, senão o efeito lê fragmentado — que era o defeito: existia só o halo
+         solto, sem luz real, sem feixe e sem poça.
+           1. SpotLight real, apontado pro chão — é o que de fato ilumina
+           2. brilho da própria lâmpada
+           3. cone volumétrico ligando lâmpada e chão (a poeira iluminada)
+           4. poça de luz no piso, apoiada no terreno
+         O raio da poça e o da base do cone saem os dois de
+         atenuação física do PointLight, sem decal nenhum no piso. */
       function addSecurityLight(xAt, lateral) {
         var g = new THREE.Group();
         var p = trackPos(xAt, lateral);
+        var baseY = terrainHeight(p.x, p.z);
         var H = 6.2;
+        var ARM_X = 1.0;                 // deslocamento horizontal da luminária
+        var LAMP_Y = H - 0.49;           // altura da lente da luminária
+
         var mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.11, H, 8), secPostMat);
         mast.position.y = H / 2;
         mast.castShadow = true;
@@ -5450,34 +5728,68 @@
         arm.rotation.z = Math.PI / 2 - 0.35;
         arm.position.set(0.5, H - 0.12, 0);
         var head = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.13, 0.3), secBodyMat);
-        head.position.set(1.0, H - 0.42, 0);
+        head.position.set(ARM_X, H - 0.42, 0);
+
         var lampMat = new THREE.MeshStandardMaterial({
           color: 0xfff0c4, emissive: 0xffe9b0, emissiveIntensity: 0.15, roughness: 0.4
         });
         var lampLens = new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.24), lampMat);
         lampLens.rotation.x = -Math.PI / 2;
-        lampLens.position.set(1.0, H - 0.49, 0);
+        lampLens.position.set(ARM_X, LAMP_Y, 0);
 
-        var halo = new THREE.Sprite(new THREE.SpriteMaterial({
-          map: makeGlowSpriteTexture('#ffe9b0'), color: 0xffe9b0,
-          transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false
-        }));
-        halo.scale.set(4.2, 4.2, 1);
-        halo.position.set(1.0, H - 0.5, 0);
-        secNightLamps.push({ halo: halo, lamp: lampMat });
+        /* Mesma receita do farol da locomotiva (ver addSoftLight): PointLight
+           com decay 2 e sprite pequeno. Substituiu o par SpotLight + plano de
+           poça: o cone dava aresta de recorte e o plano dava o disco estático.
+           A diferença de contexto fica só nos números — o poste é mais alto e
+           tem alcance maior que o farol, mas circular e localizado, como
+           iluminação pública. */
+        var lampada = addSoftLight(g, ARM_X, LAMP_Y - 0.12, 0, {
+          color: SEC_LIGHT_COLOR,
+          intensity: SEC_LIGHT_INTENSITY,
+          distance: SEC_LIGHT_DISTANCE,
+          glowHex: '#fff4d6',
+          glowScale: 0.85,          // maior que o farol (0.55): luminária é maior que um farol
+          glowOpacity: 0.8
+        });
 
-        g.add(mast, arm, head, lampLens, halo);
-        g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
+        g.add(mast, arm, head, lampLens);
+        addWalkCollider(p.x, p.z, 0.2);    // mastro do poste de luz
+        g.position.set(p.x, baseY, p.z);
         g.rotation.y = -trackHeading(xAt);
         secGroup.add(g);
+
+        secNightLamps.push({ soft: lampada, lamp: lampMat });
       }
 
       // ====================== ÁREA 1 — PÓRTICO ==============================
       // Dois trechos paralelos à via, um de cada lado, SEM fechar as pontas: a
       // linha tem que passar. Concertina nos dois (área de maior criticidade).
-      secGroup.add(buildFenceRun(SEC_GANTRY_X0, SEC_GANTRY_X1, SEC_GANTRY_LATERAL, true));
+      /* REMOVIDA a pedido: a cerca do pórtico no lado POSITIVO (lateral +5,6,
+         estações -11 a 11, com concertina) — a que corria colada ao lastro com
+         campo aberto do outro lado. O lado -5,6 continua. */
       secGroup.add(buildFenceRun(SEC_GANTRY_X0, SEC_GANTRY_X1, -SEC_GANTRY_LATERAL, true));
-      addSecSign(-4.5, SEC_GANTRY_LATERAL, ['ÁREA RESTRITA', 'PESSOAL AUTORIZADO'], '#e8c400', '#161616', false, true);
+      /* Costura pórtico <-> portaria. A lateral interna (+5,6) e a externa
+         (-5,6) passam a correr da estação do portão até a ponta leste do
+         pórtico, e as pontas fecham transversalmente até SEC_RAIL_CLEAR — o
+         limite do lastro. Só a faixa da via (|lateral| < 3,5) fica aberta, que é
+         a exceção declarada: linha férrea não se cerca. */
+      /* REMOVIDO a pedido: o trecho de ligação em lateral +5,6, estações -17 a
+         -11, que emendava a portaria na cerca do pórtico. Era o pedaço sem
+         concertina que aparecia colado ao lastro. Com ele e o par do lado -5,6
+         fora, o perímetro unificado deixa de existir como contorno fechado —
+         restam a Área 1 (pórtico), a Área 2 (subestação), os flancos do portão,
+         a cerca externa em 17,2 e a divisa sul em 9,6. */
+      /* REMOVIDAS a pedido: a corrida em -5,6 de -17 a -11 e o fechamento
+         transversal em -17 do mesmo lado. Ficavam atrás da guarita, do outro
+         lado do trilho, e perderam função depois da cerca de divisa sul.
+         Consequência assumida: o perímetro deixa de fechar no canto sudoeste. */
+      secGroup.add(buildFenceCross(SEC_GANTRY_X1, SEC_RAIL_CLEAR, SEC_PERIM_LAT_OUT));
+      secGroup.add(buildFenceCross(SEC_GANTRY_X1, -SEC_GANTRY_LATERAL, -SEC_RAIL_CLEAR));
+      /* A placa de 'ÁREA RESTRITA' estava na cerca de +5,6, que depois da fusão
+         virou divisória INTERNA (corredor da via de um lado, corredor da estrada
+         do outro — os dois dentro do perímetro). Foi para a cerca externa, que é
+         a que de fato encara quem está de fora. */
+      addSecSign(-4.5, SEC_PERIM_LAT_OUT, ['ÁREA RESTRITA', 'PESSOAL AUTORIZADO'], '#e8c400', '#161616', false, true);
       addSecSign(4.5, -SEC_GANTRY_LATERAL, ['PROIBIDA A ENTRADA'], '#b31414', '#ffffff', false, false);
       addCctv(-9.5, SEC_GANTRY_LATERAL + 0.9, 4.6, true);
       addCctv(9.5, -(SEC_GANTRY_LATERAL + 0.9), 4.6, false);
@@ -5522,22 +5834,69 @@
          e está modelado recuado (aberto), e a cancela está levantada: a passagem
          da estrada continua livre, que é o requisito de não bloquear caminho já
          usado pela navegação. */
+      var secGateBoomPivot = null;      // grupo articulado da cancela (ver abaixo)
+      var secGateTargetAngle = 0;       // ângulo alvo, definido por setGateOpen()
+      var secGateLeaf = null;           // grupo da folha do portão de correr
+      var secGateLeafTargetZ = 0;       // estação alvo da folha, definida por setGateOpen()
+      var secGateLampOkMat = null;      // lente verde do indicador de acesso
+      var secGateLampStopMat = null;    // lente vermelha
+
       (function buildGatehouse() {
         var g = new THREE.Group();
         var p = trackPos(SEC_GATE_X, SEC_GATE_LATERAL);
 
+        /* ---- PORTÃO DE CORRER --------------------------------------------
+           Por que a folha aparecia como chapa preta lisa: NÃO era o material.
+           `leafFrame` era um BoxGeometry(0.07, 2.2, 3.3) na MESMA posição da
+           folha — um bloco maciço de secPostMat que continha a folha inteira
+           dentro de si (folha: x=0, y[0.05,2.15], z[0.80,4.00]; bloco:
+           x[-0.035,0.035], y[0,2.20], z[0.75,4.05]). Qualquer raio até a folha
+           atravessava primeiro uma face opaca do bloco, então o que se via era
+           sempre o bloco, nunca a tela. Na face sem sol ele lia como preto.
+           O material da folha sempre esteve correto — é o mesmo secFenceMat com
+           alphaTest 0.35 e DoubleSide das outras cercas, que aparecem vazadas.
+
+           A moldura agora é moldura de verdade: quatro barras no perímetro mais
+           um montante central, todas finas, com a tela visível entre elas.
+
+           A folha também saiu de x=0 para x=-0.25: em x=0 ela atravessava a
+           coluna de z=+1,7 (que ocupa x[-0.13,0.13]) — interpenetração real de
+           geometria, não só confusão visual. Deslocada, ela corre RENTE às
+           colunas, como um portão de correr de verdade, com 0,085 de folga. */
+        var LEAF_X = -0.25, LEAF_W = 3.2, LEAF_H = 2.1, LEAF_CY = 1.1;
         var rail = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.06, 7.2), secPostMat);
-        rail.position.set(0, 0.03, 0);
+        rail.position.set(LEAF_X, 0.03, 1.7);   // centrado entre as duas estações da folha
 
         var leafMat = secFenceMat.clone();
         leafMat.map = chainLinkTex.clone();
         leafMat.map.repeat.set(5, 3.4);
         leafMat.map.needsUpdate = true;
-        var leaf = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 2.1), leafMat);
-        leaf.position.set(0, 1.1, 2.4);
+
+        // A folha inteira vive num grupo: updateSecurity() anima só a posição
+        // dele, então tela e moldura nunca podem sair de sincronia entre si.
+        secGateLeaf = new THREE.Group();
+        secGateLeaf.position.set(LEAF_X, 0, SEC_GATE_OPEN ? SEC_LEAF_OPEN_Z : SEC_LEAF_CLOSED_Z);
+        secGateLeafTargetZ = secGateLeaf.position.z;
+
+        var leaf = new THREE.Mesh(new THREE.PlaneGeometry(LEAF_W, LEAF_H), leafMat);
+        leaf.position.set(0, LEAF_CY, 0);
         leaf.rotation.y = Math.PI / 2;
-        var leafFrame = new THREE.Mesh(new THREE.BoxGeometry(0.07, 2.2, 3.3), secPostMat);
-        leafFrame.position.set(0, 1.1, 2.4);
+        secGateLeaf.add(leaf);
+
+        var quadroH = new THREE.BoxGeometry(0.07, 0.09, LEAF_W + 0.1);   // travessas
+        var quadroV = new THREE.BoxGeometry(0.07, LEAF_H + 0.1, 0.09);   // montantes
+        [LEAF_CY - LEAF_H / 2, LEAF_CY + LEAF_H / 2].forEach(function (by) {
+          var barra = new THREE.Mesh(quadroH, secPostMat);
+          barra.position.set(0, by, 0);
+          barra.castShadow = true;
+          secGateLeaf.add(barra);
+        });
+        [-LEAF_W / 2, 0, LEAF_W / 2].forEach(function (bz) {
+          var montante = new THREE.Mesh(quadroV, secPostMat);
+          montante.position.set(0, LEAF_CY, bz);
+          montante.castShadow = true;
+          secGateLeaf.add(montante);
+        });
 
         [-1.7, 1.7].forEach(function (cz) {
           var col = new THREE.Mesh(new THREE.BoxGeometry(0.26, 2.9, 0.26), secWhiteMat);
@@ -5546,53 +5905,323 @@
           g.add(col);
         });
 
-        // Cancela levadiça, braço listrado no mesmo hazardMat das faixas de piso.
-        var pivot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.9, 0.22), secBodyMat);
-        pivot.position.set(1.6, 0.45, -2.3);
-        var boom = new THREE.Mesh(new THREE.BoxGeometry(3.4, 0.11, 0.11), hazardMat);
-        boom.position.set(1.6 + 1.55, 1.05, -2.3);
-        boom.rotation.z = 0.21;
+        /* Indicador de acesso na coluna interna, virado para a pista: verde =
+           liberado, vermelho = bloqueado, piscando enquanto o mecanismo ainda
+           está em curso. É o retorno visual de que o portão tem estado — sem
+           ele, quem não abre o console não sabe se o acesso está aberto. */
+        var semaforo = new THREE.Group();
+        semaforo.position.set(0.20, 2.30, -1.7);
+        semaforo.add(new THREE.Mesh(new THREE.BoxGeometry(0.10, 0.42, 0.18), secBodyMat));
+        secGateLampStopMat = new THREE.MeshStandardMaterial({
+          color: 0x4a1113, emissive: 0xff2a20, emissiveIntensity: 0, roughness: 0.35
+        });
+        secGateLampOkMat = new THREE.MeshStandardMaterial({
+          color: 0x113a1c, emissive: 0x30e06a, emissiveIntensity: 0, roughness: 0.35
+        });
+        /* Lentes nas DUAS faces (+X e -X): a pista corre no X local, então um
+           indicador de face única só seria legível para quem chega de um lado.
+           Lente de 0,085 e não 0,055 — a de 0,055 sumia a poucos metros. */
+        var lenteGeo = new THREE.SphereGeometry(0.085, 10, 8);
+        [0.07, -0.07].forEach(function (face) {
+          var lStop = new THREE.Mesh(lenteGeo, secGateLampStopMat);
+          lStop.position.set(face, 0.10, 0);
+          var lOk = new THREE.Mesh(lenteGeo, secGateLampOkMat);
+          lOk.position.set(face, -0.10, 0);
+          semaforo.add(lStop, lOk);
+        });
+        g.add(semaforo);
 
-        // Guarita: caixa + janela + telhado com beiral.
-        var hutBody = new THREE.Mesh(new THREE.BoxGeometry(1.9, 2.3, 1.7), secWhiteMat);
-        hutBody.position.set(-2.6, 1.15, -2.2);
+        /* ---- CANCELA (PROBLEMA 1 corrigido) ----------------------------
+           Estava assim:
+               boom.position.set(1.6 + 1.55, 1.05, -2.3);
+               boom.rotation.z = 0.21;
+           O erro: `rotation.z` gira a barra em torno do CENTRO dela (o pivô de
+           uma BoxGeometry é o próprio centro). Como o centro ainda estava
+           deslocado 1,55 do eixo e por cima disso levava 0,21 rad, o braço ficava
+           nem horizontal nem vertical — pendurado na diagonal e desencostado do
+           mecanismo. Cancela levadiça real gira em torno da EXTREMIDADE presa ao
+           pivô, não do meio do braço.
+
+           Correção: um Group no eixo de rotação, com a barra deslocada meio
+           comprimento no +X — assim a extremidade coincide com o eixo. Girar o
+           GRUPO em Z dá o movimento certo, e os dois estados ficam definidos:
+             0     = fechada (barra horizontal, atravessando a passagem)
+            +PI/2  = aberta  (barra vertical PARA CIMA, liberada)
+
+           O sinal importa e estava invertido. Rotação em torno de +Z leva
+           (x,y) -> (x cos0 - y sen0, x sen0 + y cos0). Com a barra em
+           (BOOM_LEN/2, 0): 0 deixa em (+1.7, 0) = horizontal; +PI/2 leva a
+           (0, +1.7) = ergue; -PI/2 leva a (0, -1.7) = APONTA PARA BAIXO e o
+           braço atravessa o terreno. Estava -PI/2, então aberta enterrava a
+           cancela — só se via o toco entre o pivô (y=1,02) e o chão.
+           A transição entre eles é interpolada em updateSecurity(). */
+        /* ---- ORIENTAÇÃO DA CANCELA -------------------------------------
+           A estrada de acesso corre AO LONGO da via (addStripWithCanalGap(13.5,
+           makeRoadRun)) e SEC_GATE_LATERAL = 13.5 põe a portaria em cima dela.
+           Logo o tráfego se move no X local, e uma barreira só barra alguma
+           coisa se ATRAVESSAR o Z local.
+
+           O braço estava deitado ao longo do X — paralelo à estrada, sem barrar
+           nada: passava-se por baixo dele pela lateral. A folha de tela, essa
+           sim, já atravessava o Z corretamente.
+
+           Correção sem mexer na lógica de levadiça: um grupo de GUINADA leva o
+           +X local do conjunto para o +Z da portaria. O pivô continua girando em
+           rotation.z e continua erguendo no +Y do mundo, porque uma rotação em Y
+           não mexe no eixo vertical — os dois estados (0 e +PI/2) e a
+           interpolação de updateSecurity() valem exatamente como antes. */
+        var BOOM_LEN = 4.0;                                 // cobre o vão de 3,4 entre as colunas com folga
+        var mech = new THREE.Mesh(new THREE.BoxGeometry(0.26, 1.0, 0.26), secBodyMat);
+        mech.position.set(1.6, 0.5, -2.1);                  // mastro na borda da estrada, fora da passagem
+        mech.castShadow = true;
+
+        var secGateBoomYaw = new THREE.Group();
+        secGateBoomYaw.position.set(1.6, 1.02, -2.1);       // topo do mecanismo = eixo do braço
+        secGateBoomYaw.rotation.y = -Math.PI / 2;           // +X do conjunto passa a apontar para +Z da portaria
+
+        secGateBoomPivot = new THREE.Group();
+        secGateBoomYaw.add(secGateBoomPivot);
+
+        var boom = new THREE.Mesh(new THREE.BoxGeometry(BOOM_LEN, 0.11, 0.11), hazardMat);
+        boom.position.x = BOOM_LEN / 2;                    // extremidade no eixo, não o centro
+        boom.castShadow = true;
+        // contrapeso do lado curto, como em cancela real
+        var counterW = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.2, 0.2), secBodyMat);
+        counterW.position.x = -0.28;
+        // pé de apoio na ponta livre, que só encosta quando a cancela está baixa
+        /* O pé tem que ir da barra até o chão, não parar no ar. O pivô está a
+           1,02 do terreno e a barra tem 0,11 de espessura, então o vão a cobrir
+           vai de -0,055 (base da barra) a -1,02 (chão): 0,965 de comprimento,
+           centrado em -0,538. Antes eram 0,5 centrados em -0,3, que terminavam
+           0,47 acima do solo — o pé ficava pendurado. */
+        var boomTip = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.965, 6), secPostMat);
+        boomTip.position.set(BOOM_LEN - 0.1, -0.538, 0);
+        secGateBoomPivot.add(boom, counterW, boomTip);
+        // o que entra na cena é a guinada; o pivô vive dentro dela
+
+        secGateTargetAngle = SEC_GATE_OPEN ? Math.PI / 2 : 0;
+        secGateBoomPivot.rotation.z = secGateTargetAngle;  // começa já no estado configurado
+
+        /* ---- GUARITA (PROBLEMA 2 corrigido) ----------------------------
+           Antes só existia um plano de vidro solto na face lateral, sem moldura e
+           sem nenhuma porta — o volume lia como contêiner fechado. Agora tem:
+           porta (vão recuado + folha + maçaneta + degrau), janela emoldurada com
+           peitoril virada pro portão, e uma segunda janela virada pra estrada. */
+        var HUT_W = 1.9, HUT_H = 2.3, HUT_D = 1.7;
+        var hutX = -2.6, hutZ = -2.2;
+        var hutBody = new THREE.Mesh(new THREE.BoxGeometry(HUT_W, HUT_H, HUT_D), secWhiteMat);
+        hutBody.position.set(hutX, HUT_H / 2, hutZ);
         hutBody.castShadow = true;
-        var hutGlass = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 0.85), new THREE.MeshStandardMaterial({
-          color: 0x9fc4d6, roughness: 0.15, metalness: 0.5, transparent: true, opacity: 0.72, side: THREE.DoubleSide
-        }));
-        hutGlass.position.set(-1.64, 1.5, -2.2);
-        hutGlass.rotation.y = Math.PI / 2;
-        var hutRoof = new THREE.Mesh(new THREE.BoxGeometry(2.35, 0.12, 2.15), secBodyMat);
-        hutRoof.position.set(-2.6, 2.36, -2.2);
 
-        g.add(rail, leaf, leafFrame, pivot, boom, hutBody, hutGlass, hutRoof);
+        var glassMat = new THREE.MeshStandardMaterial({
+          color: 0x9fc4d6, roughness: 0.12, metalness: 0.55,
+          transparent: true, opacity: 0.62, side: THREE.DoubleSide
+        });
+
+        // janela 1 — face voltada pro portão (+X), com moldura e peitoril
+        var win1 = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.8), glassMat);
+        win1.position.set(hutX + HUT_W / 2 + 0.012, 1.52, hutZ);
+        win1.rotation.y = Math.PI / 2;
+        var win1Frame = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.92, 1.27), secPostMat);
+        win1Frame.position.set(hutX + HUT_W / 2 + 0.005, 1.52, hutZ);
+        var sill1 = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 1.3), secBodyMat);
+        sill1.position.set(hutX + HUT_W / 2 + 0.05, 1.05, hutZ);
+
+        // janela 2 — face voltada pra estrada (-Z), pro guarda ver quem chega
+        var win2 = new THREE.Mesh(new THREE.PlaneGeometry(0.95, 0.7), glassMat);
+        win2.position.set(hutX, 1.52, hutZ - HUT_D / 2 - 0.012);
+        var win2Frame = new THREE.Mesh(new THREE.BoxGeometry(1.07, 0.82, 0.05), secPostMat);
+        win2Frame.position.set(hutX, 1.52, hutZ - HUT_D / 2 - 0.005);
+
+        /* Porta na face -X: o vão é um bloco escuro EMBUTIDO na parede (recuo) e
+           a folha fica ligeiramente à frente dele. Esse par recuo+folha é o que
+           dá leitura de abertura real, em vez de um retângulo pintado. */
+        var doorRecess = new THREE.Mesh(new THREE.BoxGeometry(0.1, 1.85, 0.78), new THREE.MeshStandardMaterial({
+          color: 0x14181c, roughness: 0.95, metalness: 0
+        }));
+        doorRecess.position.set(hutX - HUT_W / 2 + 0.03, 0.93, hutZ + 0.25);
+        var door = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.8, 0.72), new THREE.MeshStandardMaterial({
+          color: 0x4a5560, roughness: 0.6, metalness: 0.35
+        }));
+        door.position.set(hutX - HUT_W / 2 - 0.02, 0.9, hutZ + 0.25);
+        door.castShadow = true;
+        var handle = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.022, 0.14, 6), secPostMat);
+        handle.rotation.x = Math.PI / 2;
+        handle.position.set(hutX - HUT_W / 2 - 0.06, 0.92, hutZ + 0.55);
+        // degrau de acesso, pra porta não flutuar sobre o piso
+        var step = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.1, 0.9), secBodyMat);
+        step.position.set(hutX - HUT_W / 2 - 0.2, 0.05, hutZ + 0.25);
+
+        var hutRoof = new THREE.Mesh(new THREE.BoxGeometry(HUT_W + 0.45, 0.12, HUT_D + 0.45), secBodyMat);
+        hutRoof.position.set(hutX, HUT_H + 0.06, hutZ);
+        hutRoof.castShadow = true;
+
+        /* Letreiro de identificação (parte da correção do PROBLEMA 3): sem ele a
+           portaria não se anuncia como o acesso da instalação. Usa a mesma
+           makeSignTexture do resto da sinalização. */
+        var letreiro = new THREE.Mesh(
+          new THREE.PlaneGeometry(2.6, 0.62),
+          new THREE.MeshStandardMaterial({
+            map: makeSignTexture(['ACESSO CONTROLADO', 'PORTICO WAYSIDE 04'], '#12333d', '#e8c400', false),
+            roughness: 0.7, metalness: 0.1, side: THREE.DoubleSide
+          })
+        );
+        letreiro.position.set(0, 3.25, 0);
+        /* A face legível olha para -X, o mesmo lado da porta da guarita
+           (doorRecess/handle/step ficam em hutX - HUT_W/2, ou seja na face -X).
+           Com +PI/2 o texto ficava virado para +X e quem sai da cabine via o
+           verso espelhado. Rotação em Y leva a normal (0,0,1) para (sen0,0,cos0):
+           +PI/2 aponta para +X, -PI/2 aponta para -X. */
+        letreiro.rotation.y = -Math.PI / 2;
+        var letreiroSup = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.5, 0.08), secPostMat);
+        letreiroSup.position.set(0, 3.0, 1.25);
+        var letreiroSup2 = letreiroSup.clone();
+        letreiroSup2.position.z = -1.25;
+
+        g.add(rail, secGateLeaf, mech, secGateBoomYaw,
+          hutBody, win1, win1Frame, sill1, win2, win2Frame,
+          doorRecess, door, handle, step, hutRoof,
+          letreiro, letreiroSup, letreiroSup2);
         g.position.set(p.x, terrainHeight(p.x, p.z), p.z);
         g.rotation.y = -trackHeading(SEC_GATE_X);
         secGroup.add(g);
       })();
 
+      /* Alterna o estado da cancela com transição de 90°. Exposto porque o estado
+         é uma propriedade da portaria, não um detalhe de animação:
+         setGateOpen(false) baixa a barra até a horizontal, true levanta até a
+         vertical. A interpolação roda em updateSecurity(). */
+      function setGateOpen(aberta) {
+        SEC_GATE_OPEN = !!aberta;
+        secGateTargetAngle = SEC_GATE_OPEN ? Math.PI / 2 : 0;
+        secGateLeafTargetZ = SEC_GATE_OPEN ? SEC_LEAF_OPEN_Z : SEC_LEAF_CLOSED_Z;
+      }
+      /* Continua exposto para teste manual. Usá-lo DESLIGA o modo automático —
+         sem isso o quadro seguinte recalcularia pela distância do trem e
+         desfaria o comando na hora, o que faria a API parecer quebrada.
+         window.__setGateAuto(true) devolve o controle ao automático. */
+      window.__setGateOpen = function (aberta) { gateAutoMode = false; setGateOpen(aberta); };
+      window.__setGateAuto = function (ligado) { gateAutoMode = ligado !== false; return gateAutoMode; };
+
       // cerca curta flanqueando a portaria, deixando o vão da estrada livre
-      secGroup.add(buildFenceRun(SEC_GATE_X + 1.9, SEC_GATE_X + 8, SEC_GATE_LATERAL, false));
-      secGroup.add(buildFenceRun(SEC_GATE_X - 8, SEC_GATE_X - 1.9, SEC_GATE_LATERAL, false));
-      addSecSign(SEC_GATE_X + 3.6, SEC_GATE_LATERAL, ['ÁREA RESTRITA', 'IDENTIFIQUE-SE'], '#e8c400', '#161616', false, true);
+      /* Guarita e transformador: volumes fechados que o pedestre não deve
+         atravessar. Um círculo por volume é suficiente — são caixas curtas e
+         aproximadamente quadradas em planta. */
+      (function () {
+        var gh = trackPos(SEC_GATE_X - 2.6, SEC_GATE_LATERAL);
+        addWalkCollider(gh.x, gh.z, 1.35);
+        var tf = trackPos(SEC_TRAFO_X, POLE_Z);
+        addWalkCollider(tf.x, tf.z, 0.9);
+      })();
+      /* Flancos do portão: ATRAVESSAM a estrada em vez de correr por cima dela.
+         O vão entre SEC_GATE_LAT_IN e SEC_GATE_LAT_OUT é a pista, e é a única
+         abertura do perímetro inteiro — fechada pela folha de tela e pela
+         cancela. As duas corridas antigas (que ficavam na linha de centro da
+         pista, sem fechar nada) saíram. */
+      secGroup.add(buildFenceCross(SEC_GATE_X, SEC_RAIL_CLEAR, SEC_GATE_LAT_IN));
+      secGroup.add(buildFenceCross(SEC_GATE_X, SEC_GATE_LAT_OUT, SEC_PERIM_LAT_OUT));
+      // Cerca externa fechando o corredor da estrada por fora, do portão à ponta leste.
+      secGroup.add(buildFenceRun(SEC_GATE_X, SEC_GANTRY_X1, SEC_PERIM_LAT_OUT, false));
+      /* --- Cerca de divisa sul ------------------------------------------
+         Corre da portaria até a ponta do traçado onde o trem reaparece.
+         Sentido: animate() faz trainGroup.position.x = -LOOP/2 + rawX com
+         rawX em [0, LOOP), então o trem SURGE em -210 e caminha para +X. A
+         extremidade sul — oposta ao pórtico (0) e à ponte (+16) vista da
+         portaria (-17) — é portanto -LOOP/2.
+
+         Lateral 11,8 (SEC_GATE_LAT_IN), e não a cerca externa em 17,2, por
+         dois motivos medidos:
+           · VEG_CLEARANCE = 15 — a vegetação só é semeada a partir de
+             lateral 15, então 17,2 atravessaria 193 unidades de mata e os
+             troncos furariam os painéis; 11,8 fica dentro da clareira;
+           · 11,8 é a borda INTERNA da pista (makeRoadRun em 13,5 ± 1,7), então
+             a cerca tangencia a estrada sem invadi-la, separando pista e via —
+             que é o que uma cerca de faixa de domínio faz.
+         Os postes de transmissão estão em POLE_Z = -7,4, no lado oposto.
+
+         SEC_SOUTH_FENCE_LAT = 9.6 e não 11,8: a guarita ocupa lateral 10,45 a
+         12,15, então 11,8 passava DENTRO do volume dela e bem na frente da
+         porta (a porta fica na face -X, com degrau em 11,05..11,55). 9,6 deixa
+         0,85 de folga da guarita, 1,45 do degrau, 2,20 da pista e 2,07 da coluna
+         interna do portão. Continua emendando no flanco interno
+         (buildFenceCross(SEC_GATE_X, 3.5, 11.8) cobre 3,5..11,8), agora em T no
+         meio do flanco em vez de topo a topo — sem vão do mesmo jeito. */
+      var SEC_SOUTH_FENCE_LAT = 9.6;
+      secGroup.add(buildFenceRun(-LOOP / 2, SEC_GATE_X, SEC_SOUTH_FENCE_LAT, false));
+      /* Estava em SEC_GATE_X - 1.2 (estação -18,2), lateral 15,6: FLUTUANDO.
+         addSecSign pendura a placa na cota do terreno + 1,5 e a orienta paralela
+         à via, mas naquela estação não passa cerca nenhuma — os flancos do portão
+         existem só NA estação -17, e a cerca externa começa em -17. Movida para a
+         cerca externa (SEC_PERIM_LAT_OUT), logo depois do portão, onde há painel
+         atrás dela e a orientação paralela à via casa com o painel. */
+      addSecSign(SEC_GATE_X + 1.6, SEC_PERIM_LAT_OUT, ['ÁREA RESTRITA', 'IDENTIFIQUE-SE'], '#e8c400', '#161616', false, true);
       addCctv(SEC_GATE_X - 3.2, SEC_GATE_LATERAL - 1.2, 4.4, false);
       addSecurityLight(SEC_GATE_X + 2.4, SEC_GATE_LATERAL - 1.8);
 
-      /* --- Animação: LED das CFTV e halo noturno ---------------------------
+      /* --- Animação: LED das CFTV e iluminação noturna ----------------------
          Pisca via emissiveIntensity em JS, não por onBeforeCompile: são poucos
          materiais, e um shader customizado por câmera chegaria exatamente no
-         mesmo resultado visual custando mais. O halo segue o mesmo estado
+         mesmo resultado visual custando mais. A iluminação segue o estado
          `weather` que o resto da cena usa pra decidir se é noite. */
       var secLedPhase = 0;
+      var secNightMix = 0;      // 0 = dia, 1 = noite; dirige spot, brilho, feixe e poça
       function updateSecurity(dt) {
+        /* Acionamento automático: o trem chegando abre o acesso, o trem se
+           afastando fecha. Roda antes da interpolação para que a mudança de
+           alvo já seja consumida no mesmo quadro. */
+        if (gateAutoMode && trainGroup) {
+          // distância da PONTA do trem até a estação do portão, medida no laço
+          var dEstacao = mod(trainGroup.position.x - SEC_GATE_X + LOOP / 2, LOOP) - LOOP / 2;
+          var dTrem = Math.max(0, Math.abs(dEstacao) - TRAIN_HALF_LEN);
+          if (!SEC_GATE_OPEN && dTrem < GATE_AUTO_OPEN_DISTANCE) setGateOpen(true);
+          else if (SEC_GATE_OPEN && dTrem > GATE_AUTO_CLOSE_DISTANCE) setGateOpen(false);
+        }
+
+        /* Cancela: transição de 90° entre os dois estados definidos. Aproxima o
+           ângulo alvo por quadro em vez de saltar, que é o que dá o movimento
+           de barreira levadiça de verdade. */
+        if (secGateBoomPivot) {
+          var dAng = secGateTargetAngle - secGateBoomPivot.rotation.z;
+          if (Math.abs(dAng) > 0.001) {
+            var passo = SEC_GATE_SWING_SPEED * dt;
+            secGateBoomPivot.rotation.z += Math.abs(dAng) < passo ? dAng : Math.sign(dAng) * passo;
+          }
+        }
+        /* Folha do portão: mesma abordagem da cancela, em translação. Percorre
+           os 3,35 entre as duas estações em ~1,8 s, contra ~1,0 s dos 90° da
+           cancela — portão de correr é mais lento que cancela, e os dois partem
+           no mesmo instante porque leem o mesmo SEC_GATE_OPEN. */
+        if (secGateLeaf) {
+          var dZ = secGateLeafTargetZ - secGateLeaf.position.z;
+          if (Math.abs(dZ) > 0.001) {
+            var passoZ = SEC_GATE_SLIDE_SPEED * dt;
+            secGateLeaf.position.z += Math.abs(dZ) < passoZ ? dZ : Math.sign(dZ) * passoZ;
+          }
+        }
+        /* Indicador de acesso. Pisca enquanto cancela ou folha ainda estão a
+           caminho do alvo, fica fixo quando o movimento termina — assim o
+           estado 'em transição' se distingue de 'assentado' sem texto nenhum. */
+        if (secGateLampOkMat) {
+          var emCurso =
+            (secGateBoomPivot && Math.abs(secGateTargetAngle - secGateBoomPivot.rotation.z) > 0.02) ||
+            (secGateLeaf && Math.abs(secGateLeafTargetZ - secGateLeaf.position.z) > 0.02);
+          var pisca = emCurso ? (Math.sin(secLedPhase * 3.2) > 0 ? 1 : 0.10) : 1;
+          secGateLampOkMat.emissiveIntensity = SEC_GATE_OPEN ? 1.9 * pisca : 0.03;
+          secGateLampStopMat.emissiveIntensity = SEC_GATE_OPEN ? 0.03 : 1.9 * pisca;
+        }
         secLedPhase += dt * SEC_LED_HZ * Math.PI * 2;
         var on = Math.sin(secLedPhase) > 0.35 ? 1.5 : 0.09;
         for (var i = 0; i < secLedMats.length; i++) secLedMats[i].emissiveIntensity = on;
+        /* Acende/apaga o conjunto inteiro junto: spot, brilho da lâmpada, feixe
+           e poça compartilham o mesmo secNightMix, então nunca aparece um sem o
+           outro — o efeito fragmentado vinha justamente disso. */
         var noite = (weather === 'night') ? 1 : 0;
+        secNightMix += (noite - secNightMix) * Math.min(1, dt * 2.5);
         for (var j = 0; j < secNightLamps.length; j++) {
           var L = secNightLamps[j];
-          L.halo.material.opacity += (noite * 0.55 - L.halo.material.opacity) * Math.min(1, dt * 2.5);
-          L.lamp.emissiveIntensity = 0.15 + noite * 1.1;
+          L.soft.luz.intensity = secNightMix * L.soft.intensidadeNominal;
+          L.soft.brilho.opacity = secNightMix * L.soft.brilhoNominal;
+          L.lamp.emissiveIntensity = 0.15 + secNightMix * 1.1;
         }
       }
 
@@ -5614,8 +6243,17 @@
       };
 
       window.__securityStats = function () {
+        var dEst = mod(trainGroup.position.x - SEC_GATE_X + LOOP / 2, LOOP) - LOOP / 2;
         return {
           areas: ['portico', 'subestacao', 'portaria'],
+          portao: {
+            aberto: SEC_GATE_OPEN,
+            modoAutomatico: gateAutoMode,
+            distanciaDoTrem: +Math.max(0, Math.abs(dEst) - TRAIN_HALF_LEN).toFixed(1),
+            abreEm: GATE_AUTO_OPEN_DISTANCE, fechaEm: GATE_AUTO_CLOSE_DISTANCE,
+            anguloCancela: secGateBoomPivot ? +secGateBoomPivot.rotation.z.toFixed(3) : null,
+            estacaoFolha: secGateLeaf ? +secGateLeaf.position.z.toFixed(2) : null
+          },
           cftv: secLedMats.length,
           postesDeLuz: secNightLamps.length,
           transformadorCercado_x: SEC_TRAFO_X,
@@ -6014,6 +6652,10 @@
         var zBase = side * 1.05;
         var bearingBox = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.32, 0.4), bearingHousingMat);
         bearingBox.position.set(0, 0, zBase);
+        // Indexada por lado para o Cenário de Risco poder trocar o material
+        // apenas do mancal afetado (bearingHousingMat é compartilhado).
+        group.userData.bearingBoxes = group.userData.bearingBoxes || {};
+        group.userData.bearingBoxes[side > 0 ? 'DIR' : 'ESQ'] = bearingBox;
         bearingBox.castShadow = true; bearingBox.receiveShadow = true;
         group.add(bearingBox);
 
@@ -6792,14 +7434,18 @@
         headlightVisor.rotation.x = -0.3;
         headlightVisor.position.set(5.9, 2.05, 0);
         group.add(headlightVisor);
-        headlightBeam = new THREE.PointLight(0xfff2c0, 1.1, 8, 2);
-        headlightBeam.position.set(6.0, 1.95, 0);
-        group.add(headlightBeam);
-        var headlightGlowTex = makeGlowSpriteTexture('#fff2c0');
-        var headlightGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: headlightGlowTex, color: 0xfff2c0, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
-        headlightGlow.scale.set(0.55, 0.55, 0.55);
-        headlightGlow.position.set(6.02, 1.95, 0);
-        group.add(headlightGlow);
+        /* Farol: mesma addSoftLight() que os postes de segurança usam — era
+           daqui que a receita saiu (PointLight decay 2 + sprite pequeno), então
+           passar por ela consolida as duas numa implementação só, em vez de
+           manter dois efeitos equivalentes escritos de formas diferentes. */
+        var farol = addSoftLight(group, 6.0, 1.95, 0, {
+          color: 0xfff2c0, intensity: 1.1, distance: 8,
+          glowHex: '#fff2c0', glowScale: 0.55, glowOffsetX: 0.02, glowOpacity: 0.85
+        });
+        // acesa direto: o farol do trem fica sempre ligado nesta demo
+        farol.luz.intensity = farol.intensidadeNominal;
+        farol.brilho.opacity = farol.brilhoNominal;
+        headlightBeam = farol.luz;
 
         // luzes marcadoras (classificação) flanqueando o farol — vermelho parado,
         // detalhe de cor que quebra o monocromático farol+pintura
@@ -6870,8 +7516,10 @@
         return sets;
       })();
       var nextAxleId = 1;
+      // wagonCars[i] corresponde a carCenters[i + 1] (0 é a locomotiva).
+      var wagonCars = [];
       for (var wi = 0; wi < NUM_WAGONS; wi++) {
-        createWagonCar(carCenters[wi + 1], wagonHealthSets[wi], nextAxleId);
+        wagonCars.push(createWagonCar(carCenters[wi + 1], wagonHealthSets[wi], nextAxleId));
         nextAxleId += 4;
       }
       var TOTAL_AXLES = nextAxleId - 1;
@@ -6882,29 +7530,6 @@
       var simulationPaused = false;
       var droneTourActive = false;
       var droneTourTimer = null;
-      var sabotageGroup = new THREE.Group();
-      world.add(sabotageGroup);
-
-      var sabotageStyles = {
-        dust: { color: 0xd59a67, label: 'POEIRA EXTREMA', verdict: 'FALSO POSITIVO FILTRADO' },
-        grease: { color: 0xff3b3b, label: 'GRAXA SUSPEITA', verdict: 'VAZAMENTO CONFIRMADO' },
-        reflection: { color: 0x8ed7ff, label: 'REFLEXO METÁLICO', verdict: 'REFLEXO DESCARTADO' }
-      };
-      function dropSabotageFault(kind) {
-        var style = sabotageStyles[kind];
-        if (!style) return;
-        var station = (Math.random() - 0.5) * 18;
-        var p = trackPos(station, 0);
-        var markerMat = new THREE.MeshStandardMaterial({ color: style.color, emissive: style.color, emissiveIntensity: 1.4, roughness: 0.45, metalness: 0.25 });
-        var marker = new THREE.Mesh(new THREE.OctahedronGeometry(0.18, 0), markerMat);
-        marker.position.set(p.x, 0.27, p.z);
-        marker.userData.sabotage = kind;
-        sabotageGroup.add(marker);
-        document.getElementById('faultDropzone').textContent = style.label + ' inserida · arraste outra';
-        pushLog('[' + fmtClock(simClock) + '] Sabotador inseriu ' + style.label + ' no trilho — Edge: ' + style.verdict, kind === 'grease' ? 'alert' : 'sys');
-        showToast('Falha inserida: ' + style.label + ' · ' + style.verdict);
-      }
-
       /* ============================================================
          6. PARTÍCULAS DE POEIRA DE MINÉRIO SUSPENSA
       =============================================================*/
@@ -7388,6 +8013,82 @@
         camera.position.z = controlsTarget.z + sinPhiRadius * Math.cos(spherical.theta);
         camera.lookAt(controlsTarget);
       }
+
+      /* ============================================================
+         CÂMERA LIVRE — deslocamento por WASD
+      ==============================================================
+         Complementa o mouse (que só orbita/olha). Três decisões explicam o
+         desenho:
+
+         1. MOVE O ALVO, NÃO A CÂMERA. updateCameraFromSpherical() recalcula
+            camera.position TODO quadro a partir de controlsTarget + spherical.
+            Mexer em camera.position aqui seria sobrescrito no quadro seguinte.
+            Deslocando controlsTarget, a câmera acompanha preservando o ângulo e
+            a distância que o mouse definiu — mouse e teclado ficam de fato
+            independentes, que é o comportamento pedido.
+
+         2. ESTADO DE TECLAS, NÃO EVENTO. keydown/keyup escrevem num objeto de
+            estado lido no laço de animação. Reagir ao evento em si daria uma
+            tecla por vez (sem diagonal) e cadência presa ao auto-repeat do SO.
+
+         3. CONFLITO DE TECLAS — WASD já existe duas vezes nesta cena:
+              · modo Pedestre (walkKeys) move o avatar
+              · modo Maquinista (W/S) controla o acelerador
+            Por isso updateFreeCam() só age fora desses dois modos, e só é
+            chamada no ramo de órbita livre do animate() — nos modos cabine,
+            seguir-locomotiva e durante os tweens ela nem roda.
+      ------------------------------------------------------------- */
+      var FREE_CAM_MOVE_SPEED = 14;     // unidades/segundo
+      var FREE_CAM_RUN_MULT = 2.6;      // multiplicador com Shift
+      var freeCamKeys = { w: false, a: false, s: false, d: false, run: false };
+      var freeFwd = new THREE.Vector3();
+      var freeRight = new THREE.Vector3();
+      var freeMove = new THREE.Vector3();
+      var FREE_CAM_UP = new THREE.Vector3(0, 1, 0);
+
+      window.addEventListener('keydown', function (e) {
+        var k = e.key.toLowerCase();
+        if (k === 'w') freeCamKeys.w = true;
+        if (k === 'a') freeCamKeys.a = true;
+        if (k === 's') freeCamKeys.s = true;
+        if (k === 'd') freeCamKeys.d = true;
+        if (e.shiftKey) freeCamKeys.run = true;
+      });
+      window.addEventListener('keyup', function (e) {
+        var k = e.key.toLowerCase();
+        if (k === 'w') freeCamKeys.w = false;
+        if (k === 'a') freeCamKeys.a = false;
+        if (k === 's') freeCamKeys.s = false;
+        if (k === 'd') freeCamKeys.d = false;
+        if (!e.shiftKey) freeCamKeys.run = false;
+      });
+
+      function updateFreeCam(dt) {
+        // Guardas de conflito: nesses modos o WASD pertence a outra função.
+        if (walkMode || driverMode) return;
+        if (!freeCamKeys.w && !freeCamKeys.a && !freeCamKeys.s && !freeCamKeys.d) return;
+
+        /* Direção REAL do olhar, tirada da própria câmera — não de um eixo fixo
+           do mundo. É o que faz o W seguir para onde o mouse está apontando. */
+        camera.getWorldDirection(freeFwd);
+        freeRight.crossVectors(freeFwd, FREE_CAM_UP).normalize();
+
+        freeMove.set(0, 0, 0);
+        if (freeCamKeys.w) freeMove.add(freeFwd);
+        if (freeCamKeys.s) freeMove.sub(freeFwd);
+        if (freeCamKeys.d) freeMove.add(freeRight);
+        if (freeCamKeys.a) freeMove.sub(freeRight);
+        if (freeMove.lengthSq() < 1e-8) return;
+
+        /* Normaliza antes de aplicar a velocidade: sem isso W+A (diagonal)
+           andaria ~41% mais rápido que W sozinho, porque a soma dos dois vetores
+           unitários tem módulo sqrt(2). */
+        freeMove.normalize().multiplyScalar(
+          FREE_CAM_MOVE_SPEED * (freeCamKeys.run ? FREE_CAM_RUN_MULT : 1) * dt
+        );
+        controlsTarget.add(freeMove);   // a câmera segue via updateCameraFromSpherical()
+      }
+
       function setSphericalFromCurrentPosition() {
         var offset = new THREE.Vector3().subVectors(camera.position, controlsTarget);
         spherical.radius = offset.length();
@@ -7475,6 +8176,8 @@
         // Largura do comboio medida da linha de centro: com a via em curva, um
         // envelope preso ao eixo Z=0 bloquearia mato vazio e liberaria o trilho.
         if (x > trainMinX && x < trainMaxX && Math.abs(offsetFromTrack(x, z)) < (TRAIN_HALF_WIDTH + PLAYER_RADIUS)) return false;
+        // obstáculos sólidos registrados (árvores, cercas, postes, guarita...)
+        if (hitsWalkCollider(x, z, PLAYER_RADIUS)) return false;
         return true;
       }
 
@@ -7767,18 +8470,526 @@
         btn.addEventListener('click', function () { setSpeed(parseInt(btn.dataset.speed, 10)); });
       });
 
-      var faultDropzone = document.getElementById('faultDropzone');
-      document.querySelectorAll('.fault-chip').forEach(function (chip) {
-        chip.addEventListener('dragstart', function (e) { e.dataTransfer.setData('text/plain', chip.dataset.fault); });
-        chip.addEventListener('click', function () { dropSabotageFault(chip.dataset.fault); });
-      });
-      faultDropzone.addEventListener('dragover', function (e) { e.preventDefault(); faultDropzone.classList.add('over'); });
-      faultDropzone.addEventListener('dragleave', function () { faultDropzone.classList.remove('over'); });
-      faultDropzone.addEventListener('drop', function (e) {
-        e.preventDefault();
-        faultDropzone.classList.remove('over');
-        dropSabotageFault(e.dataTransfer.getData('text/plain'));
-      });
+      /* ============================================================
+         CENÁRIO DE RISCO — consequência de um vazamento não tratado
+      ==============================================================
+         Modo demonstrativo OPCIONAL e manual. A demo padrão (Weber->CNN
+         confirmando e registrando inspeção) continua idêntica: nada aqui roda
+         com o modo desligado.
+
+         A tese didática: o produto não vende "detectar graxa", vende "evitar
+         o que vem depois". Este modo mostra o depois.
+
+         COMO O CONTADOR ZERA (é o ponto pedagógico inteiro)
+         O contador "tempo sem intervenção" só corre enquanto o mancal em LEAK
+         NÃO é confirmado. Como a confirmação Weber->CNN acontece sozinha na
+         passagem pelo pórtico quando o estado ativo é "Edge (Weber + CNN)",
+         na prática:
+           - estado 1/2 (Luz Visível ou UV): ninguém está analisando -> o
+             contador corre -> a falha evolui;
+           - estado 3 (Edge): a cascata confirma na primeira passagem ->
+             riskNoteInspection() zera o contador -> nada acontece.
+         Ou seja, a diferença entre "acidente ambiental" e "ordem de serviço"
+         é literalmente ter a camada computacional ligada. É esse o recado.
+
+         ESTÁGIOS (0 = vigilância, 1..5 = progressão irreversível)
+           0  aguardando       contador correndo, nada visível
+           1  superaquecimento fumaça no mancal + carcaça esquentando p/ laranja
+           2  faísca           fagulhas intermitentes, frequência subindo
+           3  falha mecânica   eixo trava/desalinha, composição perde velocidade
+           4  evento crítico   tombamento parcial do vagão + derrame de minério
+           5  poluição         mancha turva se espalhando na água, persistente
+
+         O estágio 4 exige a composição sobre a ponte (BRIDGE_X0..BRIDGE_X1) —
+         é o único trecho onde o derrame alcança a água. Se a falha mecânica
+         (3) acontecer longe do rio, o cenário NÃO pula para o 4: ele segura no
+         3, arrastando a composição em marcha reduzida, até o vagão avariado
+         alcançar a ponte. Isso mantém a regra do enunciado ("só se estiver
+         próxima da ponte") sem transformar a demo em sorteio — o apresentador
+         sempre chega ao desfecho, só não sabe em quantos segundos.
+
+         REVERSIBILIDADE
+         resetRiskScenario() devolve cada elemento ao estado original:
+         partículas escondidas e contadores zerados, material da carcaça de volta
+         ao compartilhado (bearingHousingMat), rotação/altura do eixo e do vagão
+         restauradas dos valores capturados na ativação, uSpillAmount = 0 na
+         água e riskSpeedFactor = 1. Nenhum recarregamento de página.
+      =============================================================*/
+
+      // --- limiares configuráveis (segundos de simulação) ---
+      var RISK_TIME_TO_FAILURE = 30;   // vigilância antes de iniciar a progressão
+      var RISK_STAGE1_DUR = 11;        // superaquecimento -> faísca
+      var RISK_STAGE2_DUR = 9;         // faísca -> falha mecânica
+      var RISK_STAGE3_MIN = 5;         // mínimo em falha mecânica antes de aceitar a ponte
+      var RISK_STAGE4_DUR = 5.5;       // duração do tombamento/derrame
+      var RISK_SPILL_GROW = 20;        // segundos até a mancha atingir o raio máximo
+      var RISK_SPILL_MAX_RADIUS = 30;  // raio da mancha na água (unidades de cena)
+      var RISK_SLOW_STAGE3 = 0.42;     // fator de velocidade com o eixo travado
+      var RISK_SMOKE_COUNT = 90;
+      var RISK_SPARK_COUNT = 44;
+      var RISK_ORE_COUNT = 150;
+      var RISK_WATER_Y = -2.3;         // cota da lâmina d'água (ver riverWater)
+
+      var riskMode = false;            // modo ligado pelo usuário
+      var riskStage = 0;               // 0..5
+      var riskIdleTime = 0;            // "tempo sem intervenção" acumulado
+      var riskStageTime = 0;           // tempo dentro do estágio atual
+      var riskSpeedFactor = 1;         // lido por updateDrive (1 = sem efeito)
+      var riskAxle = null;             // registro do mancal em LEAK sob observação
+      var riskCarIndex = -1;           // índice em carCenters do vagão do eixo
+      var riskFx = null;               // partículas/materiais criados sob demanda
+      var riskRestore = null;          // valores originais capturados na ativação
+      var riskSpillCenter = new THREE.Vector2(RIVER_X, 0);
+      var riskEmitPos = new THREE.Vector3();
+      var RISK_STAGE_LABEL = [
+        'Vigilância — mancal em vazamento sem intervenção',
+        'Superaquecimento do mancal',
+        'Faiscamento intermitente no contato',
+        'Falha mecânica — eixo travado',
+        'Evento crítico — tombamento e derrame',
+        'Contaminação da água — persistente'
+      ];
+
+      /* --- mancha na água ---------------------------------------------------
+         O hook de shader é instalado UMA vez, aqui na carga, e não na ativação
+         do modo: trocar onBeforeCompile em runtime obriga o Three a recompilar
+         o programa da água no meio da demo, e isso trava um quadro inteiro.
+         Com uSpillAmount = 0 o custo é um mix() descartado — nada mensurável.
+         Por isso este pedaço não entra no dispose(): ele não é "criado
+         dinamicamente", é um interruptor permanente que fica desligado. */
+      var riskSpillUniforms = {
+        uSpillCenter: { value: riskSpillCenter },
+        uSpillRadius: { value: 1 },
+        uSpillAmount: { value: 0 }
+      };
+      riverWaterMat.onBeforeCompile = function (shader) {
+        shader.uniforms.uSpillCenter = riskSpillUniforms.uSpillCenter;
+        shader.uniforms.uSpillRadius = riskSpillUniforms.uSpillRadius;
+        shader.uniforms.uSpillAmount = riskSpillUniforms.uSpillAmount;
+        // varying com a posição de MUNDO no plano XZ: a lâmina d'água é um plano
+        // girado -90°, então nem uv nem position local dão a coordenada que a
+        // mancha precisa sem uma conversão a mais.
+        shader.vertexShader = 'varying vec2 vRiskXZ;\n' + shader.vertexShader.replace(
+          '#include <begin_vertex>',
+          '#include <begin_vertex>\n  vRiskXZ = (modelMatrix * vec4(transformed, 1.0)).xz;'
+        );
+        shader.fragmentShader =
+          'varying vec2 vRiskXZ;\nuniform vec2 uSpillCenter;\nuniform float uSpillRadius;\nuniform float uSpillAmount;\n' +
+          shader.fragmentShader.replace(
+            '#include <dithering_fragment>',
+            '#include <dithering_fragment>\n' +
+            '  if (uSpillAmount > 0.001) {\n' +
+            '    float d = distance(vRiskXZ, uSpillCenter);\n' +
+            '    d *= 1.0 + 0.16 * sin(vRiskXZ.y * 0.42) * cos(vRiskXZ.x * 0.7);\n' +
+            '    float m = 1.0 - smoothstep(uSpillRadius * 0.28, uSpillRadius, d);\n' +
+            '    m *= uSpillAmount;\n' +
+            '    gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.40, 0.16, 0.10), clamp(m, 0.0, 0.9));\n' +
+            '  }\n'
+          );
+      };
+      riverWaterMat.needsUpdate = true;
+
+      // Localiza o mancal em LEAK e o vagão a que ele pertence. `ax.offset` é a
+      // estação do eixo no referencial da composição, e carCenters guarda o
+      // centro de cada carro no mesmo referencial — o vagão é o centro mais
+      // próximo. Retorna false se não houver nenhum eixo em vazamento.
+      function riskFindLeakAxle() {
+        riskAxle = null; riskCarIndex = -1;
+        for (var i = 0; i < axles.length; i++) {
+          if (axles[i].health === 'LEAK') { riskAxle = axles[i]; break; }
+        }
+        if (!riskAxle) return false;
+        var best = Infinity;
+        for (var c = 1; c < carCenters.length; c++) {   // 0 é a locomotiva
+          var d = Math.abs(carCenters[c] - riskAxle.offset);
+          if (d < best) { best = d; riskCarIndex = c; }
+        }
+        return true;
+      }
+
+      // Cria as três nuvens de partículas do cenário. Chamado só na ativação:
+      // com o modo desligado nada disso existe na GPU.
+      function riskBuildFx() {
+        if (riskFx) return;
+        var fx = {};
+
+        // fumaça — mesma textura de partícula da poeira de minério (dustTex),
+        // só recolorida e com opacidade menor; nenhum sistema novo.
+        var smokeGeo = new THREE.BufferGeometry();
+        fx.smokePos = new Float32Array(RISK_SMOKE_COUNT * 3);
+        fx.smokeLife = new Float32Array(RISK_SMOKE_COUNT);
+        fx.smokeVel = new Float32Array(RISK_SMOKE_COUNT * 3);
+        smokeGeo.setAttribute('position', new THREE.BufferAttribute(fx.smokePos, 3));
+        fx.smokeGeo = smokeGeo;
+        fx.smokeMat = new THREE.PointsMaterial({
+          map: dustTex, color: 0x8c7d70, size: 0.34, transparent: true, opacity: 0,
+          depthWrite: false, sizeAttenuation: true
+        });
+        fx.smoke = new THREE.Points(smokeGeo, fx.smokeMat);
+        fx.smoke.frustumCulled = false;
+        world.add(fx.smoke);
+
+        // faíscas — mesma textura, blending aditivo e tamanho menor
+        var sparkGeo = new THREE.BufferGeometry();
+        fx.sparkPos = new Float32Array(RISK_SPARK_COUNT * 3);
+        fx.sparkLife = new Float32Array(RISK_SPARK_COUNT);
+        fx.sparkVel = new Float32Array(RISK_SPARK_COUNT * 3);
+        sparkGeo.setAttribute('position', new THREE.BufferAttribute(fx.sparkPos, 3));
+        fx.sparkGeo = sparkGeo;
+        fx.sparkMat = new THREE.PointsMaterial({
+          map: dustTex, color: 0xffb257, size: 0.09, transparent: true, opacity: 0,
+          depthWrite: false, sizeAttenuation: true, blending: THREE.AdditiveBlending
+        });
+        fx.spark = new THREE.Points(sparkGeo, fx.sparkMat);
+        fx.spark.frustumCulled = false;
+        world.add(fx.spark);
+        fx.sparkCursor = 0;
+
+        // minério derramado — esferas instanciadas com o material de hematita
+        // que já enche as caçambas (oreMat), então nem material nem cor novos.
+        fx.oreGeo = new THREE.SphereGeometry(0.11, 6, 4);
+        fx.ore = new THREE.InstancedMesh(fx.oreGeo, oreMat, RISK_ORE_COUNT);
+        fx.ore.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        fx.ore.frustumCulled = false;
+        fx.ore.count = 0;
+        fx.orePos = new Float32Array(RISK_ORE_COUNT * 3);
+        fx.oreVel = new Float32Array(RISK_ORE_COUNT * 3);
+        fx.oreRest = new Uint8Array(RISK_ORE_COUNT);
+        fx.oreMtx = new THREE.Matrix4();
+        world.add(fx.ore);
+
+        riskFx = fx;
+      }
+
+      // Descarte real: geometrias e materiais criados por riskBuildFx são
+      // liberados da GPU. oreMat e dustTex NÃO são descartados — são
+      // compartilhados com o resto da cena e continuam em uso.
+      function riskDisposeFx() {
+        if (!riskFx) return;
+        world.remove(riskFx.smoke); riskFx.smokeGeo.dispose(); riskFx.smokeMat.dispose();
+        world.remove(riskFx.spark); riskFx.sparkGeo.dispose(); riskFx.sparkMat.dispose();
+        world.remove(riskFx.ore); riskFx.oreGeo.dispose(); riskFx.ore.dispose();
+        riskFx = null;
+      }
+
+      // Guarda o estado original de tudo que o cenário vai alterar. Sem isto o
+      // reset seria um chute em valores "que pareciam certos".
+      function riskCapture() {
+        if (riskRestore) return;
+        var box = riskAxle.group.userData.bearingBoxes
+          ? riskAxle.group.userData.bearingBoxes[riskAxle.side] : null;
+        var car = (riskCarIndex >= 0) ? wagonCars[riskCarIndex - 1] : null;
+        riskRestore = {
+          box: box,
+          boxMat: box ? box.material : null,          // material COMPARTILHADO
+          axleRotZ: riskAxle.group.rotation.z,
+          axleY: riskAxle.group.position.y,
+          car: car,
+          carRotZ: car ? car.rotation.z : 0,
+          carY: car ? car.position.y : 0
+        };
+        // A carcaça usa bearingHousingMat, que é o MESMO material dos ~80
+        // mancais da composição: aquecer o emissive dele acenderia o trem
+        // inteiro. Por isso o mancal afetado ganha um clone só seu enquanto o
+        // cenário roda, e o reset devolve a referência compartilhada.
+        if (box) box.material = box.material.clone();
+      }
+
+      function setRiskStage(stage) {
+        if (stage === riskStage) return;
+        riskStage = stage;
+        riskStageTime = 0;
+        document.getElementById('riskStage').textContent = 'Estágio ' + stage + '/5';
+        document.getElementById('riskStageLabel').textContent = RISK_STAGE_LABEL[stage];
+        if (stage > 0) {
+          pushLog('[' + fmtClock(simClock) + '] CENÁRIO DE RISCO · estágio ' + stage + '/5 — ' + RISK_STAGE_LABEL[stage],
+            stage >= 3 ? 'alert' : 'sys');
+        }
+        if (stage === 1) showToast('Cenário de Risco: mancal ' + riskAxle.id + ' (' + riskAxle.side + ') em superaquecimento — alerta ignorado há ' + RISK_TIME_TO_FAILURE + 's.');
+        if (stage === 4) showToast('Cenário de Risco: perda de esteira na aproximação da ponte — minério derramando no leito do rio.');
+        if (stage === 5) showToast('Cenário de Risco: água contaminada. Um mancal de manutenção barata virou passivo ambiental.');
+      }
+
+      // Chamado por handleConfirmedLeak: a inspeção foi registrada a tempo.
+      function riskNoteInspection(ax) {
+        if (!riskMode || ax !== riskAxle) return;
+        if (riskStage === 0) {
+          if (riskIdleTime > 3) {
+            pushLog('[' + fmtClock(simClock) + '] CENÁRIO DE RISCO · inspeção registrada em ' + riskIdleTime.toFixed(0) +
+              's — abaixo do limiar de ' + RISK_TIME_TO_FAILURE + 's. Falha evitada.', 'sys');
+          }
+          riskIdleTime = 0;
+        }
+        // Depois do estágio 1 a progressão é irreversível de propósito: detectar
+        // um mancal que já está faiscando não desfaz o dano. Só o botão de reset.
+      }
+
+      function riskEmitSmoke(dt, rate) {
+        var fx = riskFx;
+        fx.smokeSpawn = (fx.smokeSpawn || 0) + dt * rate;
+        for (var i = 0; i < RISK_SMOKE_COUNT; i++) {
+          var i3 = i * 3;
+          if (fx.smokeLife[i] > 0) {
+            fx.smokeLife[i] -= dt;
+            fx.smokePos[i3] += fx.smokeVel[i3] * dt;
+            fx.smokePos[i3 + 1] += fx.smokeVel[i3 + 1] * dt;
+            fx.smokePos[i3 + 2] += fx.smokeVel[i3 + 2] * dt;
+            fx.smokeVel[i3 + 1] += 0.5 * dt;          // empuxo térmico
+            fx.smokeVel[i3] *= (1 - 0.9 * dt);        // arrasto
+          } else if (fx.smokeSpawn >= 1) {
+            fx.smokeSpawn -= 1;
+            fx.smokePos[i3] = riskEmitPos.x + (Math.random() - 0.5) * 0.1;
+            fx.smokePos[i3 + 1] = riskEmitPos.y;
+            fx.smokePos[i3 + 2] = riskEmitPos.z + (Math.random() - 0.5) * 0.1;
+            fx.smokeVel[i3] = -0.5 - Math.random() * 0.7;   // fica pra trás da marcha
+            fx.smokeVel[i3 + 1] = 0.5 + Math.random() * 0.5;
+            fx.smokeVel[i3 + 2] = (Math.random() - 0.5) * 0.35;
+            fx.smokeLife[i] = 1.6 + Math.random() * 1.4;
+          } else {
+            fx.smokePos[i3 + 1] = -999;               // parqueia fora de vista
+          }
+        }
+        fx.smokeGeo.attributes.position.needsUpdate = true;
+      }
+
+      function riskEmitSparks(dt, rate) {
+        var fx = riskFx;
+        fx.sparkSpawn = (fx.sparkSpawn || 0) + dt * rate;
+        for (var i = 0; i < RISK_SPARK_COUNT; i++) {
+          var i3 = i * 3;
+          if (fx.sparkLife[i] > 0) {
+            fx.sparkLife[i] -= dt;
+            fx.sparkPos[i3] += fx.sparkVel[i3] * dt;
+            fx.sparkPos[i3 + 1] += fx.sparkVel[i3 + 1] * dt;
+            fx.sparkPos[i3 + 2] += fx.sparkVel[i3 + 2] * dt;
+            fx.sparkVel[i3 + 1] -= 7 * dt;             // gravidade: a fagulha cai
+          } else {
+            fx.sparkPos[i3 + 1] = -999;
+          }
+        }
+        while (fx.sparkSpawn >= 1) {
+          fx.sparkSpawn -= 1;
+          var k = fx.sparkCursor; fx.sparkCursor = (fx.sparkCursor + 1) % RISK_SPARK_COUNT;
+          var k3 = k * 3;
+          fx.sparkPos[k3] = riskEmitPos.x;
+          fx.sparkPos[k3 + 1] = riskEmitPos.y - 0.16;   // ponto de contato roda/trilho
+          fx.sparkPos[k3 + 2] = riskEmitPos.z;
+          fx.sparkVel[k3] = -1.6 - Math.random() * 2.4;
+          fx.sparkVel[k3 + 1] = 0.8 + Math.random() * 1.6;
+          fx.sparkVel[k3 + 2] = (Math.random() - 0.5) * 2.2;
+          fx.sparkLife[k] = 0.28 + Math.random() * 0.3;
+        }
+        fx.sparkGeo.attributes.position.needsUpdate = true;
+      }
+
+      // Derrame: as esferas saem da caçamba tombada com velocidade lateral na
+      // direção do rio e caem. Ao cruzar a lâmina d'água (RISK_WATER_Y) a
+      // partícula é congelada ali (oreRest) — não afunda nem some, marca o ponto
+      // de entrada e sustenta visualmente a mancha que cresce.
+      function riskEmitOre(dt) {
+        var fx = riskFx;
+        fx.oreSpawn = (fx.oreSpawn || 0) + dt * 42;
+        while (fx.oreSpawn >= 1 && fx.ore.count < RISK_ORE_COUNT) {
+          fx.oreSpawn -= 1;
+          var k = fx.ore.count++, k3 = k * 3;
+          fx.orePos[k3] = riskEmitPos.x + (Math.random() - 0.5) * 3.2;
+          fx.orePos[k3 + 1] = riskEmitPos.y + 1.4 + Math.random() * 0.6;
+          fx.orePos[k3 + 2] = riskEmitPos.z + (Math.random() - 0.5) * 1.2;
+          fx.oreVel[k3] = 1.2 + Math.random() * 2.6;          // empurra pro rio (+X)
+          fx.oreVel[k3 + 1] = 0.4 + Math.random() * 1.1;
+          fx.oreVel[k3 + 2] = (Math.random() - 0.5) * 1.6;
+          fx.oreRest[k] = 0;
+        }
+        for (var i = 0; i < fx.ore.count; i++) {
+          var i3 = i * 3;
+          if (!fx.oreRest[i]) {
+            fx.oreVel[i3 + 1] -= 9.8 * dt;
+            fx.orePos[i3] += fx.oreVel[i3] * dt;
+            fx.orePos[i3 + 1] += fx.oreVel[i3 + 1] * dt;
+            fx.orePos[i3 + 2] += fx.oreVel[i3 + 2] * dt;
+            var chao = terrainHeight(fx.orePos[i3], fx.orePos[i3 + 2]);
+            if (inRiverZone(fx.orePos[i3], 0) && fx.orePos[i3 + 1] <= RISK_WATER_Y) {
+              fx.orePos[i3 + 1] = RISK_WATER_Y; fx.oreRest[i] = 1;
+            } else if (!inRiverZone(fx.orePos[i3], 0) && fx.orePos[i3 + 1] <= chao + 0.1) {
+              fx.orePos[i3 + 1] = chao + 0.1; fx.oreRest[i] = 1;
+            }
+          }
+          fx.oreMtx.makeTranslation(fx.orePos[i3], fx.orePos[i3 + 1], fx.orePos[i3 + 2]);
+          fx.ore.setMatrixAt(i, fx.oreMtx);
+        }
+        fx.ore.instanceMatrix.needsUpdate = true;
+      }
+
+      function updateRiskScenario(dt) {
+        if (!riskMode) return;
+        var el = document.getElementById('riskTimer');
+
+        // Estágio 0 — vigilância. Só corre enquanto o mancal continuar em LEAK e
+        // a cascata ainda não o tiver confirmado.
+        if (riskStage === 0) {
+          if (!riskAxle || riskAxle.health !== 'LEAK') {
+            // o usuário sorteou outro cenário: reancora no novo mancal
+            riskRestore = null;
+            if (!riskFindLeakAxle()) { el.textContent = '—'; return; }
+            riskCapture();
+            riskIdleTime = 0;
+          }
+          riskIdleTime += dt * speedMultiplier;
+          var mm = Math.floor(riskIdleTime / 60), ss = Math.floor(riskIdleTime % 60);
+          el.textContent = (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss +
+            ' / ' + RISK_TIME_TO_FAILURE + 's';
+          if (riskIdleTime >= RISK_TIME_TO_FAILURE) setRiskStage(1);
+          return;
+        }
+
+        riskStageTime += dt * speedMultiplier;
+
+        // ponto de emissão: mancal afetado, em coordenadas de mundo (as
+        // partículas vivem no mundo e ficam pra trás da marcha, como fumaça real)
+        riskAxle.bboxHelper.getWorldPosition(riskEmitPos);
+
+        // --- 1. superaquecimento (continua ativo nos estágios seguintes) ---
+        var heat = THREE.MathUtils.clamp(riskStageTime / 6 + (riskStage > 1 ? 1 : 0), 0, 1);
+        var box = riskRestore && riskRestore.box;
+        if (box) {
+          // aço frio -> vermelho-laranja de metal aquecido, contínuo
+          box.material.emissive.setRGB(heat * 0.95, heat * heat * 0.34, heat * heat * heat * 0.06);
+          box.material.emissiveIntensity = 0.35 + heat * 1.5;
+          box.material.color.setRGB(0.22 + heat * 0.5, 0.21 + heat * 0.16, 0.20);
+        }
+        riskEmitSmoke(dt, 18 + heat * 26);
+        riskFx.smokeMat.opacity = 0.34 * Math.min(1, riskStageTime / 2 + (riskStage > 1 ? 1 : 0));
+
+        if (riskStage === 1 && riskStageTime >= RISK_STAGE1_DUR) setRiskStage(2);
+
+        // --- 2. faísca (frequência sobe conforme se aproxima do estágio 3) ---
+        if (riskStage >= 2) {
+          var ramp = (riskStage === 2) ? THREE.MathUtils.clamp(riskStageTime / RISK_STAGE2_DUR, 0, 1) : 1;
+          riskFx.sparkMat.opacity = 0.9;
+          // rajadas: fagulha de mancal é intermitente, não um jato contínuo
+          var burst = (Math.sin(simClock * 5.5) > 0.35) ? 1 : 0.12;
+          riskEmitSparks(dt, (6 + ramp * 46) * burst);
+          if (riskStage === 2 && riskStageTime >= RISK_STAGE2_DUR) setRiskStage(3);
+        }
+
+        // --- 3. falha mecânica: eixo travado, composição em marcha reduzida ---
+        if (riskStage >= 3) {
+          var sev = (riskStage === 3) ? THREE.MathUtils.clamp(riskStageTime / 4, 0, 1) : 1;
+          riskSpeedFactor = lerp(1, RISK_SLOW_STAGE3, sev);
+          // desalinhamento + trepidação de alta frequência no eixo afetado
+          riskAxle.group.rotation.z = riskRestore.axleRotZ + sev * (0.035 + Math.sin(simClock * 38) * 0.012);
+          riskAxle.group.position.y = riskRestore.axleY + Math.sin(simClock * 46) * 0.012 * sev;
+        }
+
+        // --- 4. evento crítico: só quando o vagão avariado está sobre a ponte ---
+        if (riskStage === 3 && riskStageTime >= RISK_STAGE3_MIN) {
+          var carX = trainGroup.position.x + carCenters[riskCarIndex];
+          if (carX > BRIDGE_X0 - 1 && carX < BRIDGE_X1 + 1) {
+            riskSpillCenter.set(RIVER_X, trackZ(RIVER_X));
+            riskSpillUniforms.uSpillCenter.value.copy(riskSpillCenter);
+            setRiskStage(4);
+          }
+        }
+        if (riskStage === 4) {
+          var t = THREE.MathUtils.clamp(riskStageTime / RISK_STAGE4_DUR, 0, 1);
+          var ease = t * t * (3 - 2 * t);                  // smoothstep: tombamento sem estalo
+          riskSpeedFactor = lerp(RISK_SLOW_STAGE3, 0, ease);
+          var car = riskRestore.car;
+          if (car) {
+            car.rotation.z = riskRestore.carRotZ + ease * 0.30;   // ~17° de tombamento parcial
+            car.position.y = riskRestore.carY - ease * 0.42;      // desce da esteira
+          }
+          if (t > 0.25) riskEmitOre(dt);
+          if (t >= 1) setRiskStage(5);
+        }
+
+        // --- 5. poluição: mancha crescendo, persistente até o reset ---
+        if (riskStage === 5) {
+          riskSpeedFactor = 0;
+          riskEmitOre(dt);                                 // assenta o que ainda cai
+          var g = THREE.MathUtils.clamp(riskStageTime / RISK_SPILL_GROW, 0, 1);
+          riskSpillUniforms.uSpillRadius.value = 2 + g * RISK_SPILL_MAX_RADIUS;
+          riskSpillUniforms.uSpillAmount.value = Math.min(1, riskStageTime / 3);
+        }
+
+        el.textContent = (riskStage >= 4) ? 'evento consumado' : 'limiar ultrapassado';
+      }
+
+      // Restaura TODOS os elementos tocados pelo cenário. Cada linha aqui
+      // corresponde a uma linha que altera o mesmo valor lá em cima.
+      function resetRiskScenario(silencioso) {
+        riskStage = 0; riskIdleTime = 0; riskStageTime = 0; riskSpeedFactor = 1;
+        // água
+        riskSpillUniforms.uSpillAmount.value = 0;
+        riskSpillUniforms.uSpillRadius.value = 1;
+        // partículas
+        if (riskFx) {
+          riskFx.smokeLife.fill(0); riskFx.sparkLife.fill(0);
+          riskFx.smokePos.fill(-999); riskFx.sparkPos.fill(-999);
+          riskFx.smokeGeo.attributes.position.needsUpdate = true;
+          riskFx.sparkGeo.attributes.position.needsUpdate = true;
+          riskFx.smokeMat.opacity = 0; riskFx.sparkMat.opacity = 0;
+          riskFx.ore.count = 0;
+          riskFx.oreSpawn = 0; riskFx.smokeSpawn = 0; riskFx.sparkSpawn = 0;
+        }
+        // material do mancal, pose do eixo e do vagão
+        if (riskRestore) {
+          if (riskRestore.box) {
+            riskRestore.box.material.dispose();            // descarta o clone aquecido
+            riskRestore.box.material = riskRestore.boxMat; // devolve o compartilhado
+          }
+          if (riskAxle) {
+            riskAxle.group.rotation.z = riskRestore.axleRotZ;
+            riskAxle.group.position.y = riskRestore.axleY;
+          }
+          if (riskRestore.car) {
+            riskRestore.car.rotation.z = riskRestore.carRotZ;
+            riskRestore.car.position.y = riskRestore.carY;
+          }
+          riskRestore = null;
+        }
+        document.getElementById('riskStage').textContent = 'Estágio 0/5';
+        document.getElementById('riskStageLabel').textContent = riskMode ? RISK_STAGE_LABEL[0] : 'Modo desligado';
+        document.getElementById('riskTimer').textContent = riskMode ? '00:00 / ' + RISK_TIME_TO_FAILURE + 's' : '—';
+        if (riskMode && riskFindLeakAxle()) riskCapture();
+        if (!silencioso) pushLog('[' + fmtClock(simClock) + '] CENÁRIO DE RISCO · reiniciado — cena restaurada ao estado nominal', 'sys');
+      }
+
+      function setRiskMode(on) {
+        if (on === riskMode) return;
+        // O enunciado é explícito: este modo nunca roda dentro da Demonstração
+        // Guiada. Ela cicla os estados sozinha e acabaria confirmando o
+        // vazamento por conta própria, tornando o cenário insondável.
+        if (on && guidedMode) {
+          showToast('Desligue a Demonstração Guiada antes de ativar o Cenário de Risco — os dois disputam o mesmo estado de detecção.');
+          return;
+        }
+        riskMode = on;
+        document.getElementById('riskBtn').classList.toggle('active', on);
+        document.getElementById('riskResetBtn').disabled = !on;
+        if (on) {
+          if (!riskFindLeakAxle()) {
+            riskMode = false;
+            document.getElementById('riskBtn').classList.remove('active');
+            document.getElementById('riskResetBtn').disabled = true;
+            showToast('Nenhum mancal em vazamento na composição — sorteie um cenário antes.');
+            return;
+          }
+          riskBuildFx();
+          resetRiskScenario(true);
+          pushLog('[' + fmtClock(simClock) + '] CENÁRIO DE RISCO ativado — mancal ' + riskAxle.id + '/' + TOTAL_AXLES +
+            ' (' + riskAxle.side + ') sob observação. Confirme a inspeção em até ' + RISK_TIME_TO_FAILURE + 's para evitar a falha.', 'sys');
+        } else {
+          resetRiskScenario(true);
+          riskDisposeFx();
+          document.getElementById('riskStageLabel').textContent = 'Modo desligado';
+          document.getElementById('riskTimer').textContent = '—';
+          pushLog('[' + fmtClock(simClock) + '] CENÁRIO DE RISCO desativado — efeitos descartados', 'sys');
+        }
+      }
+
+      document.getElementById('riskBtn').addEventListener('click', function () { setRiskMode(!riskMode); });
+      document.getElementById('riskResetBtn').addEventListener('click', function () { if (riskMode) resetRiskScenario(false); });
 
       /* --- Demonstração guiada: cicla os 3 estados automaticamente (~20s) --- */
       var guidedMode = false;
@@ -7800,6 +9011,9 @@
       }
       function setGuidedMode(on) {
         if (on === guidedMode) return;
+        // A Guiada cicla os estados sozinha e acabaria confirmando o vazamento
+        // por conta própria — o Cenário de Risco nunca roda dentro dela.
+        if (on && riskMode) setRiskMode(false);
         guidedMode = on;
         document.getElementById('guidedBtn').classList.toggle('active', on);
         if (guidedTimer) { clearTimeout(guidedTimer); guidedTimer = null; }
@@ -8020,6 +9234,9 @@
 
       function updateDrive(dt) {
         var target = driverMode ? (throttleNotch / THROTTLE_NOTCHES) : 1.0;
+        // Cenário de Risco: eixo travado/tombamento arrastam a composição para
+        // baixo. Fora do cenário riskSpeedFactor é 1 e esta linha é inerte.
+        target *= riskSpeedFactor;
         // Inércia assimétrica: 18 mil toneladas ganham velocidade muito mais devagar
         // do que perdem (o freio dinâmico + atrito somam contra o movimento). Sem
         // essa assimetria o comboio se comporta como um carro leve.
@@ -8536,6 +9753,18 @@
           radius: 6, color: '#c9d900', weight: 2, fillColor: '#c9d900', fillOpacity: 0.9
         }).addTo(gpsMap).bindTooltip('Pórtico SPECTRA · KM 341', { direction: 'top', offset: [0, -6] });
 
+        // Ponte da cena, pela MESMA conversão que move o marcador do trem — o
+        // ponto cai, por construção, onde a composição entra na ponte em 3D.
+        // Rótulo fala em "ponte da cena", não em rio nomeado: RIVER_X é uma
+        // escolha de enquadramento (ver o comentário na sua declaração), então
+        // este ponto não coincide com um curso d'água real dos tiles. Serve pro
+        // apresentador saber onde a travessia vai acontecer. Azul-água pra não
+        // se confundir com o marco amarelo do pórtico.
+        var crossing = trainWorldXToLatLon(RIVER_X);
+        L.circleMarker([crossing.lat, crossing.lon], {
+          radius: 6, color: '#4fd2e0', weight: 2, fillColor: '#4fd2e0', fillOpacity: 0.9
+        }).addTo(gpsMap).bindTooltip('Ponte da cena · travessia do rio', { direction: 'top', offset: [0, -6] });
+
         gpsTrainMarker = L.marker([GPS_BASE_LAT, GPS_BASE_LON], {
           icon: L.divIcon({ className: 'gps-train-marker', html: '<span></span>', iconSize: [16, 16], iconAnchor: [8, 8] }),
           interactive: false
@@ -8597,6 +9826,7 @@
         edgeLedAlertTimer = 1.6;
         activeInspMarker = { ax: ax, until: performance.now() + 3200 };
         playInspectionAlarm();
+        riskNoteInspection(ax);   // Cenário de Risco: detecção a tempo zera o contador
         showToast('Vazamento detectado — evidência de inspeção capturada. Registro ' + ev.id + ' · confiança ' + (ev.confidence * 100).toFixed(0) + '%.');
         renderInspectionGallery();
       }
@@ -9091,6 +10321,8 @@
           camera.lookAt(controlsTarget);
           if (t >= 1) { setSphericalFromCurrentPosition(); tween = null; }
         } else {
+          // Ramo da órbita livre: é o único lugar onde o WASD da câmera age.
+          updateFreeCam(dt);
           updateCameraFromSpherical();
         }
 
@@ -9142,6 +10374,7 @@
         updateVegetationLOD(dt);
         updateSecurity(dt);
         updateWeather(dt);
+        updateRiskScenario(dt);
 
         updateDrive(dt);
         
